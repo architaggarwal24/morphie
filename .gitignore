@@ -1,0 +1,24 @@
+# dependencies and build output
+node_modules/
+.next/
+.open-next/
+.wrangler/
+*.tsbuildinfo
+next-env.d.ts
+
+# secrets and local data (never commit these)
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+!.env.example
+!.dev.vars.example
+data/*
+!data/.gitkeep
+
+# logs, editors, OS
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
