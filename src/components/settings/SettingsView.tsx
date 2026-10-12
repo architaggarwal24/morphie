@@ -1,11 +1,13 @@
 "use client";
-import { Database, KeyRound, Palette, SlidersHorizontal, Wrench, type LucideIcon } from "lucide-react";
+import { Database, KeyRound, Palette, SlidersHorizontal, UserRound, Wrench, type LucideIcon } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { cn } from "../ui";
+import { AccountSection } from "./AccountSection";
 import { AgentSection, AppearanceSection, DataSection, ToolsSection } from "./OtherSections";
 import { ProvidersSection } from "./ProvidersSection";
 
 const SECTIONS: Array<{ id: string; label: string; icon: LucideIcon }> = [
+  { id: "account", label: "Account", icon: UserRound },
   { id: "providers", label: "Providers", icon: KeyRound },
   { id: "agent", label: "Chat & agent", icon: SlidersHorizontal },
   { id: "tools", label: "Tools", icon: Wrench },
@@ -31,6 +33,7 @@ export function SettingsView() {
       </nav>
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl px-4 py-6 pb-24 md:px-8 md:py-8 md:pb-10 animate-rise" key={settingsSection}>
+          {settingsSection === "account" && <AccountSection />}
           {settingsSection === "providers" && <ProvidersSection />}
           {settingsSection === "agent" && <AgentSection />}
           {settingsSection === "tools" && <ToolsSection />}

@@ -46,3 +46,6 @@ export function sse(req: Request, run: (emit: Emit, signal: AbortSignal) => Prom
   });
 }
 
+/** In-process guard so one conversation can't run two agents at once. */
+const g = globalThis as unknown as { __morphieRunning?: Set<string> };
+export const running = (g.__morphieRunning ??= new Set<string>());

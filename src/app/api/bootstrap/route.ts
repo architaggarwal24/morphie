@@ -9,17 +9,17 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** Everything the UI needs on first load, in one round trip. */
-export const GET = route(async (c) => {
-  const { profiles, activeId } = await listProfiles(c.userId);
+export const GET = route({ auth: "guest" }, async (c) => {
+  const { profiles, activeId } = listProfiles(c.actor);
   return {
     version: "2.0.0",
     catalog: publicCatalog(),
     customPresets: CUSTOM_PRESETS,
     profiles, activeId,
-    settings: await getSettings(c.userId),
+    settings: getSettings(c.actor),
     tools: toolInfos(),
-    search: { user: !!(await getSecret(c.userId, "tavily")), server: !!config.tavilyKey },
-    conversations: await listConversations(c.userId),
+    search: { user: !!getSecret(c.actor, "tavily"), server: !!config.tavilyKey },
+    conversations: listConversations(c.actor),
     server: { allowPrivateUrls: config.allowPrivateUrls, maxUploadMb: Math.round(config.maxUploadBytes / 1048576), maxAgentSteps: config.maxAgentSteps },
   };
 });

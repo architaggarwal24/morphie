@@ -16,6 +16,7 @@ export function middleware(request: NextRequest) {
     "img-src 'self' data: blob:",
     `connect-src 'self'${dev ? " ws: wss:" : ""}`,
     "object-src 'none'",
+    "worker-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
     "frame-ancestors 'none'",

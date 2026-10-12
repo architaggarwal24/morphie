@@ -7,8 +7,9 @@
 import { zipSync, strToU8 } from "fflate";
 import type { DesignState, DesignSummary, DesignThemeView, DesignVersionView } from "@/lib/types";
 import { randomId } from "../crypto";
-import { withLock } from "../coordinator";
-import { db, now, stmt } from "../db";
+import type { Actor } from "../auth/actor";
+import * as store from "../data/designs";
+import { now } from "../db";
 import { ApiError } from "../http";
 import type { Provider } from "../providers/types";
 import { DesignAgent, type DesignProgress, type DesignResult } from "./agent";
@@ -27,25 +28,29 @@ export class DesignStateError extends ApiError {
   constructor(message: string, status = 409) { super(status, message, "design_state"); }
 }
 
-interface DesignRow { id: string; user_id: string; name: string; cursor: number; next_version: number; revision: number; created_at: number; updated_at: number }
-interface VersionRow { version: number; json: string; prompt: string; summary: string; created_at: number }
+type DesignRow = store.DesignRow;
 
 // ---- per-project mutex --------------------------------------------------
-// Workers run many isolates, so the lock lives in the user's Coordinator Durable Object (FIFO, with a TTL).
-// The key is `design:<id or "new">`; the lock is already scoped to the user by the object it lives in.
-const locked = <T>(userId: string, key: string, fn: () => Promise<T> | T): Promise<T> =>
-  withLock(userId, `design:${key}`, fn, { ttlMs: 5 * 60_000, waitMs: 5 * 60_000 });
+const g = globalThis as unknown as { __morphieDesignLocks?: Map<string, Promise<unknown>> };
+const locks = (g.__morphieDesignLocks ??= new Map());
+async function withLock<T>(key: string, fn: () => Promise<T> | T): Promise<T> {
+  const prev = locks.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  const tail = run.catch(() => {});
+  locks.set(key, tail);
+  try { return await run; } finally { if (locks.get(key) === tail) locks.delete(key); }
+}
 
 // ---- storage -----------------------------------------------------------
-async function getRow(userId: string, id: string): Promise<DesignRow> {
-  const row = await db().get<DesignRow>("SELECT * FROM designs WHERE id = ? AND user_id = ?", id, userId);
+function getRow(actor: Actor, id: string): DesignRow {
+  const row = store.getDesignRow(actor, id);
   if (!row) throw new DesignStateError("That design no longer exists.", 404);
   return row;
 }
 
 /** Versions oldest→newest, each design re-validated; ones that no longer validate are dropped. */
-async function loadVersions(row: DesignRow): Promise<Array<{ version: number; design: Design; prompt: string; summary: string; createdAt: number }>> {
-  const rows = await db().all<VersionRow>("SELECT version, json, prompt, summary, created_at FROM design_versions WHERE design_id = ? ORDER BY version ASC", row.id);
+function loadVersions(actor: Actor, row: DesignRow): Array<{ version: number; design: Design; prompt: string; summary: string; createdAt: number }> {
+  const rows = store.loadVersionRows(actor, row.id);
   const out = [];
   for (const r of rows) {
     try { out.push({ version: r.version, design: validateDesign(JSON.parse(r.json)), prompt: r.prompt, summary: r.summary, createdAt: r.created_at }); }
@@ -54,9 +59,9 @@ async function loadVersions(row: DesignRow): Promise<Array<{ version: number; de
   return out;
 }
 
-async function stateOf(userId: string, id: string): Promise<DesignState> {
-  const row = await getRow(userId, id);
-  const versions = await loadVersions(row);
+function stateOf(actor: Actor, id: string): DesignState {
+  const row = getRow(actor, id);
+  const versions = loadVersions(actor, row);
   if (!versions.length) throw new DesignStateError("That design has no readable versions.", 404);
   let idx = versions.findIndex((v) => v.version === row.cursor);
   if (idx < 0) idx = versions.length - 1;
@@ -68,38 +73,36 @@ async function stateOf(userId: string, id: string): Promise<DesignState> {
   };
 }
 
-async function currentDesign(userId: string, id: string): Promise<Design> {
-  return (await stateOf(userId, id)).design as unknown as Design;
+function currentDesign(actor: Actor, id: string): Design {
+  return stateOf(actor, id).design as unknown as Design;
 }
 
 /** Add a version to a project (dropping any redo branch and, once full, the oldest). Returns false if identical. */
-async function push(row: DesignRow, design: Design, summary: string, prompt: string): Promise<boolean> {
-  const versions = await loadVersions(row);
+function push(actor: Actor, row: DesignRow, design: Design, summary: string, prompt: string): boolean {
+  const versions = loadVersions(actor, row);
   const cur = versions.find((v) => v.version === row.cursor) ?? versions[versions.length - 1];
   if (cur && JSON.stringify(cur.design) === JSON.stringify(design)) return false;
-  const t = now();
-  await db().batch([
-    stmt("DELETE FROM design_versions WHERE design_id = ? AND version > ?", row.id, cur?.version ?? 0),
-    stmt("INSERT INTO design_versions (design_id, version, json, prompt, summary, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      row.id, row.next_version, JSON.stringify(design), prompt.slice(0, 2000), summary, t),
-    stmt(`DELETE FROM design_versions WHERE design_id = ? AND version <= (
-        SELECT version FROM design_versions WHERE design_id = ? ORDER BY version DESC LIMIT 1 OFFSET ?)`, row.id, row.id, HISTORY_LIMIT),
-    stmt("UPDATE designs SET cursor = ?, next_version = ?, revision = revision + 1, name = ?, updated_at = ? WHERE id = ?",
-      row.next_version, row.next_version + 1, design.name.slice(0, 60), t, row.id),
-  ]);
+  store.pushVersion(actor, row, {
+    json: JSON.stringify(design), prompt: prompt.slice(0, 2000), summary, name: design.name.slice(0, 60),
+    keepUpTo: cur?.version ?? 0, historyLimit: HISTORY_LIMIT, now: now(),
+  });
   return true;
 }
 
 // ---- public API --------------------------------------------------------
 const agent = new DesignAgent();
 
-export async function listDesigns(userId: string): Promise<DesignSummary[]> {
-  const rows = await db().all<DesignRow & { n: number }>(`SELECT d.*, (SELECT COUNT(*) FROM design_versions v WHERE v.design_id = d.id) AS n FROM designs d WHERE d.user_id = ? ORDER BY d.updated_at DESC`, userId);
-  return rows.map((r) => ({ id: r.id, name: r.name, updatedAt: r.updated_at, version: r.cursor, versions: r.n }));
+export function listDesigns(actor: Actor): DesignSummary[] {
+  return store.listDesignRows(actor).map((r) => ({ id: r.id, name: r.name, updatedAt: r.updated_at, version: r.cursor, versions: r.n }));
 }
 
-export function getDesign(userId: string, id: string): Promise<DesignState> {
-  return stateOf(userId, id);
+/** Throws a 404 unless this actor owns the design. Cheap: reads one row, renders nothing. */
+export function requireDesign(actor: Actor, id: string): void {
+  getRow(actor, id);
+}
+
+export function getDesign(actor: Actor, id: string): DesignState {
+  return stateOf(actor, id);
 }
 
 export function catalog(): { themes: DesignThemeView[]; deviceWidths: typeof DEVICE_WIDTHS } {
@@ -108,83 +111,79 @@ export function catalog(): { themes: DesignThemeView[]; deviceWidths: typeof DEV
 
 export interface CommitResult { state: DesignState; changed: boolean; kind: DesignResult["kind"]; summary: string; notes: string[] }
 
-async function commit(userId: string, row: DesignRow | null, result: DesignResult, prompt: string): Promise<CommitResult> {
+function commit(actor: Actor, row: DesignRow | null, result: DesignResult, prompt: string): CommitResult {
   let id: string;
   let changed: boolean;
   if (!row) {
     id = randomId(9);
-    const t = now();
-    await db().run("INSERT INTO designs (id, user_id, name, cursor, next_version, revision, created_at, updated_at) VALUES (?, ?, ?, 0, 1, 0, ?, ?)", id, userId, result.design.name.slice(0, 60), t, t);
-    changed = await push(await getRow(userId, id), result.design, result.summary, prompt);
+    store.insertDesign(actor, { id, name: result.design.name.slice(0, 60), now: now() });
+    changed = push(actor, getRow(actor, id), result.design, result.summary, prompt);
   } else {
     id = row.id;
-    changed = await push(row, result.design, result.summary, prompt);
+    changed = push(actor, row, result.design, result.summary, prompt);
   }
   const summary = changed ? result.summary : result.kind === "edit" && result.summary !== DEFAULT_EDIT_SUMMARY ? `${NO_CHANGE} ${result.summary}` : NO_CHANGE;
-  return { state: await stateOf(userId, id), changed, kind: result.kind, summary, notes: result.notes.slice(0, 5) };
+  return { state: stateOf(actor, id), changed, kind: result.kind, summary, notes: result.notes.slice(0, 5) };
 }
 
 /** One chat turn in Design: create a new project (designId = null) or edit an existing one. */
-export async function handleMessage(userId: string, designId: string | null, text: string, provider: Provider, opts: { signal?: AbortSignal; onProgress?: (p: DesignProgress) => void } = {}): Promise<CommitResult> {
-  return locked(userId, designId ?? "new", async () => {
-    const row = designId ? await getRow(userId, designId) : null;
-    const current = row ? await currentDesign(userId, row.id) : null;
+export async function handleMessage(actor: Actor, designId: string | null, text: string, provider: Provider, opts: { signal?: AbortSignal; onProgress?: (p: DesignProgress) => void } = {}): Promise<CommitResult> {
+  return withLock(`${actor.userId}:${designId ?? "new"}`, async () => {
+    const row = designId ? getRow(actor, designId) : null;
+    const current = row ? currentDesign(actor, row.id) : null;
     const result = await agent.respond(text, current, provider, opts);
-    return commit(userId, row, result, text);
+    return commit(actor, row, result, text);
   });
 }
 
-export function applyThemePreset(userId: string, designId: string, themeId: string): Promise<CommitResult> {
+export function applyThemePreset(actor: Actor, designId: string, themeId: string): Promise<CommitResult> {
   const preset = getTheme(themeId);
   if (!preset) throw new DesignStateError("Unknown theme.", 400);
-  return locked(userId, designId, async () => {
-    const row = await getRow(userId, designId);
-    return commit(userId, row, agent.applyPreset(await currentDesign(userId, designId), preset.id), `Use the ${preset.name} theme`);
+  return withLock(`${actor.userId}:${designId}`, () => {
+    const row = getRow(actor, designId);
+    return commit(actor, row, agent.applyPreset(currentDesign(actor, designId), preset.id), `Use the ${preset.name} theme`);
   });
 }
 
-function moveCursor(userId: string, id: string, pick: (versions: number[], at: number) => number | null, none: string): Promise<DesignState> {
-  return locked(userId, id, async () => {
-    const row = await getRow(userId, id);
-    const versions = (await loadVersions(row)).map((v) => v.version);
+function moveCursor(actor: Actor, id: string, pick: (versions: number[], at: number) => number | null, none: string): Promise<DesignState> {
+  return withLock(`${actor.userId}:${id}`, () => {
+    const row = getRow(actor, id);
+    const versions = loadVersions(actor, row).map((v) => v.version);
     const at = Math.max(0, versions.indexOf(row.cursor));
     const target = pick(versions, at);
     if (target === null || target === row.cursor) throw new DesignStateError(none);
-    await db().run("UPDATE designs SET cursor = ?, revision = revision + 1, updated_at = ? WHERE id = ?", target, now(), id);
-    return stateOf(userId, id);
+    store.setCursor(actor, id, target, now());
+    return stateOf(actor, id);
   });
 }
 
-export const undo = (u: string, id: string) => moveCursor(u, id, (v, at) => (at > 0 ? v[at - 1] : null), "Nothing to undo.");
-export const redo = (u: string, id: string) => moveCursor(u, id, (v, at) => (at < v.length - 1 ? v[at + 1] : null), "Nothing to redo.");
-export const restoreVersion = (u: string, id: string, version: number) => moveCursor(u, id, (v) => (v.includes(version) ? version : null), "That version is no longer available.");
+export const undo = (u: Actor, id: string) => moveCursor(u, id, (v, at) => (at > 0 ? v[at - 1] : null), "Nothing to undo.");
+export const redo = (u: Actor, id: string) => moveCursor(u, id, (v, at) => (at < v.length - 1 ? v[at + 1] : null), "Nothing to redo.");
+export const restoreVersion = (u: Actor, id: string, version: number) => moveCursor(u, id, (v) => (v.includes(version) ? version : null), "That version is no longer available.");
 
-export function renameDesign(userId: string, id: string, name: string): Promise<DesignState> {
-  return locked(userId, id, async () => {
-    const row = await getRow(userId, id);
-    const design = { ...(await currentDesign(userId, id)), name };
+export function renameDesign(actor: Actor, id: string, name: string): Promise<DesignState> {
+  return withLock(`${actor.userId}:${id}`, () => {
+    const row = getRow(actor, id);
+    const design = { ...currentDesign(actor, id), name };
     const valid = validateDesign(design);
-    await push(row, valid, `Renamed to ${valid.name}.`, `Rename to ${name}`);
-    return stateOf(userId, id);
+    push(actor, row, valid, `Renamed to ${valid.name}.`, `Rename to ${name}`);
+    return stateOf(actor, id);
   });
 }
 
-export async function deleteDesign(userId: string, id: string): Promise<void> {
-  await getRow(userId, id);
-  await db().batch([
-    stmt("DELETE FROM design_versions WHERE design_id = ?", id),
-    stmt("DELETE FROM designs WHERE id = ? AND user_id = ?", id, userId),
-  ]);
+export function deleteDesign(actor: Actor, id: string): void {
+  getRow(actor, id);
+  store.deleteDesign(actor, id);
 }
 
-export async function exportDesign(userId: string, id: string, fmt: string): Promise<{ format: string; designName: string; files: ExportFile[] }> {
+export function exportDesign(actor: Actor, id: string, fmt: string): { format: string; designName: string; files: ExportFile[] } {
   if (!(EXPORT_FORMATS as readonly string[]).includes(fmt)) throw new DesignStateError(`Unknown export format. Choose one of: ${EXPORT_FORMATS.join(", ")}.`, 400);
-  const design = await currentDesign(userId, id);
+  const design = currentDesign(actor, id);
   return { format: fmt, designName: design.name, files: fmt === "html" ? exportHtml(design) : exportReact(design) };
 }
 
-export async function exportZip(userId: string, id: string, fmt: string): Promise<{ filename: string; bytes: Uint8Array }> {
-  const ex = await exportDesign(userId, id, fmt);
+export function exportZip(actor: Actor, id: string, fmt: string): { filename: string; bytes: Uint8Array } {
+  const ex = exportDesign(actor, id, fmt);
   const root = `${slugify(ex.designName, "design")}-${fmt}`;
   const files: Record<string, Uint8Array> = {};
   for (const f of ex.files) files[`${root}/${f.path}`] = strToU8(f.content);

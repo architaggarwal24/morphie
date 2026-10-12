@@ -1,3 +1,5 @@
+import { config } from "../config";
+import { guardedFetch, securityCause } from "../net";
 import { redact } from "../security";
 import { ProviderError } from "./types";
 
@@ -34,7 +36,7 @@ export async function providerFetch(url: string, init: RequestInit, opts: FetchO
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, opts.timeoutMs);
     try {
-      const res = await fetch(url, { ...init, signal: controller.signal, redirect: "manual" });
+      const res = await guardedFetch(url, { ...init, signal: controller.signal }, { allowPrivate: config.allowPrivateUrls });
       clearTimeout(timer);
       if (res.status >= 300 && res.status < 400) {
         throw new ProviderError(`${opts.label} redirected the request (${res.status}). Check the base URL — it may be missing /v1 or use http instead of https.`, res.status);
@@ -50,6 +52,8 @@ export async function providerFetch(url: string, init: RequestInit, opts: FetchO
       opts.signal?.removeEventListener("abort", onUserAbort);
       if (e instanceof ProviderError) throw e;
       if (opts.signal?.aborted) throw new ProviderError("Stopped.", undefined, false);
+      const blocked = securityCause(e);
+      if (blocked) throw new ProviderError(`Blocked: ${blocked.message} Private and local addresses aren't allowed on this server.`, undefined, false);
       const err = timedOut
         ? new ProviderError(`${opts.label} didn't respond within ${Math.round(opts.timeoutMs / 1000)}s.`, 408, true)
         : new ProviderError(`Couldn't reach ${opts.label}. Check the base URL and your network. (${redact(String((e as Error)?.cause ?? (e as Error)?.message ?? e), opts.secrets ?? []).slice(0, 160)})`, undefined, true);

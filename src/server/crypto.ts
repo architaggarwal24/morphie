@@ -1,32 +1,39 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { config } from "./config";
 
-/**
- * Keys come from Worker secrets (ENCRYPTION_KEY, SESSION_SECRET). A Worker has no persistent disk, so the old
- * "generate a key file in ./data" fallback is gone: missing keys are a configuration error, reported once.
- * `node:crypto` is provided by the `nodejs_compat` compatibility flag.
- */
-export class MissingSecretError extends Error {}
+/** Reads a persistent random secret from the data dir, creating it (0600) on first use. Never in production. */
+function fileSecret(name: string): Buffer {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("ENCRYPTION_KEY and SESSION_SECRET must be set in production; file-based secrets are for development only.");
+  }
+  const file = path.join(config.dataDir, name);
+  try {
+    const hex = fs.readFileSync(file, "utf8").trim();
+    if (/^[0-9a-f]{64}$/.test(hex)) return Buffer.from(hex, "hex");
+  } catch {
+    /* create below */
+  }
+  const fresh = crypto.randomBytes(32);
+  fs.writeFileSync(file, fresh.toString("hex"), { mode: 0o600 });
+  return fresh;
+}
 
 let cachedEnc: Buffer | null = null;
 let cachedSig: Buffer | null = null;
 
-function required(value: string | undefined, name: string): string {
-  if (!value || value.length < 16) {
-    throw new MissingSecretError(`${name} is not set (or shorter than 16 characters). Set it with: npx wrangler secret put ${name}  (local: .dev.vars)`);
-  }
-  return value;
-}
-
 function encKey(): Buffer {
   if (cachedEnc) return cachedEnc;
-  cachedEnc = crypto.createHash("sha256").update(`morphie-enc:${required(config.encryptionKey, "ENCRYPTION_KEY")}`).digest();
+  const env = config.encryptionKey;
+  cachedEnc = env ? crypto.createHash("sha256").update(`morphie-enc:${env}`).digest() : fileSecret(".encryption_key");
   return cachedEnc;
 }
 
 function sigKey(): Buffer {
   if (cachedSig) return cachedSig;
-  cachedSig = crypto.createHash("sha256").update(`morphie-sig:${required(config.sessionSecret, "SESSION_SECRET")}`).digest();
+  const env = config.sessionSecret;
+  cachedSig = env ? crypto.createHash("sha256").update(`morphie-sig:${env}`).digest() : fileSecret(".session_secret");
   return cachedSig;
 }
 
@@ -55,6 +62,25 @@ export function verifySig(value: string, sig: string): boolean {
   const expected = Buffer.from(sign(value));
   const actual = Buffer.from(sig);
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
+/** Derive a purpose-bound subkey from the encryption key (used for hashing one-time codes). */
+export function subkey(label: string): Buffer {
+  return Buffer.from(crypto.hkdfSync("sha256", encKey(), Buffer.alloc(0), `morphie:${label}`, 32));
+}
+
+export function hmacHex(label: string, data: string): string {
+  return crypto.createHmac("sha256", subkey(label)).update(data).digest("hex");
+}
+
+export function safeEqualHex(a: string, b: string): boolean {
+  const x = Buffer.from(a, "utf8"); const y = Buffer.from(b, "utf8");
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+/** 32 random bytes as base64url: the secret half of a session or OAuth state. */
+export function randomToken(): string {
+  return crypto.randomBytes(32).toString("base64url");
 }
 
 export function randomId(bytes = 12): string {

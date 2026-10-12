@@ -3,7 +3,7 @@ import { deleteProfile, listProfiles } from "@/server/profiles";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const DELETE = route(async (c) => {
-  await deleteProfile(c.userId, c.params.id);
-  return listProfiles(c.userId);
+export const DELETE = route({ auth: "guest" }, async (c) => {
+  deleteProfile(c.actor, c.params.id);
+  return listProfiles(c.actor);
 });

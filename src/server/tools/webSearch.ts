@@ -1,10 +1,11 @@
+import type { Actor } from "../auth/actor";
 import { config } from "../config";
 import { getSecret } from "../settings";
 import { providerFetch } from "../providers/util";
 import { ToolError, str, type ToolDef } from "./types";
 
-export async function tavilyKey(userId: string): Promise<string | undefined> {
-  return (await getSecret(userId, "tavily")) ?? config.tavilyKey;
+export function tavilyKey(actor: Actor): string | undefined {
+  return getSecret(actor, "tavily") ?? config.tavilyKey;
 }
 
 export const webSearch: ToolDef = {
@@ -26,7 +27,7 @@ export const webSearch: ToolDef = {
   describeCall: (a) => `Search the web for “${String(a.query ?? "").slice(0, 80)}”`,
   async run(args, ctx) {
     const query = str(args, "query", 400);
-    const key = await tavilyKey(ctx.userId);
+    const key = tavilyKey(ctx.actor);
     if (!key) {
       throw new ToolError("Web search isn't set up. Add a Tavily API key in Settings → Tools to enable it (tell the user this).");
     }

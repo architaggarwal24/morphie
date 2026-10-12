@@ -1,8 +1,9 @@
 import type { AgentEvent, AgentSettings, Mode, SourceRef } from "@/lib/types";
+import type { Actor } from "../auth/actor";
 import type { Provider } from "../providers/types";
 
 export interface ToolContext {
-  userId: string;
+  actor: Actor;
   conversationId: string;
   mode: Mode;
   signal: AbortSignal;

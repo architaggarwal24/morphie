@@ -1,79 +1,171 @@
-import { cfEnv } from "./cf";
+import { DatabaseSync } from "node:sqlite";
+import path from "node:path";
+import { config } from "./config";
+import { migrate } from "./migrations";
 
 /**
- * Data access for Cloudflare D1.
- *
- * D1 is asynchronous, so every store module awaits this small wrapper. The same interface is implemented
- * on top of `node:sqlite` in tests/helpers/sqliteDb.ts, which is how the test-suite runs without a Workers
- * runtime. The schema lives in migrations/*.sql (applied with `wrangler d1 migrations apply`).
+ * SQLite via Node's built-in `node:sqlite` (Node >= 22.13): no native module to compile, nothing to install.
+ * This thin wrapper adds the two conveniences the rest of the code relies on: pragma() and transaction().
  */
-export interface RunInfo { changes: number; lastRowId: number }
-export interface StmtSpec { sql: string; params: unknown[] }
-
-export interface Db {
-  get<T = any>(sql: string, ...params: unknown[]): Promise<T | undefined>;
-  all<T = any>(sql: string, ...params: unknown[]): Promise<T[]>;
-  run(sql: string, ...params: unknown[]): Promise<RunInfo>;
-  /** Run several statements atomically (one implicit transaction). */
-  batch(stmts: StmtSpec[]): Promise<void>;
+/** Statement surface we use. Rows are untyped here; each store casts to its own row shape. */
+export interface Stmt {
+  run(...params: unknown[]): { changes: number | bigint; lastInsertRowid: number | bigint };
+  get(...params: unknown[]): any;
+  all(...params: unknown[]): any[];
 }
 
-/** Build a statement for `db().batch([...])`. */
-export const stmt = (sql: string, ...params: unknown[]): StmtSpec => ({ sql, params });
-
-/** D1 rejects `undefined` and booleans; normalise once here. */
-function clean(params: unknown[]): unknown[] {
-  return params.map((p) => (p === undefined ? null : typeof p === "boolean" ? (p ? 1 : 0) : p));
-}
-
-class D1Db implements Db {
-  constructor(private d1: D1DatabaseLike) {}
-  private bound(sql: string, params: unknown[]) { return this.d1.prepare(sql).bind(...clean(params)); }
-  async get<T = any>(sql: string, ...params: unknown[]): Promise<T | undefined> {
-    return ((await this.bound(sql, params).first<T>()) ?? undefined) as T | undefined;
-  }
-  async all<T = any>(sql: string, ...params: unknown[]): Promise<T[]> {
-    return (await this.bound(sql, params).all<T>()).results ?? [];
-  }
-  async run(sql: string, ...params: unknown[]): Promise<RunInfo> {
-    const { meta } = await this.bound(sql, params).run();
-    return { changes: Number(meta?.changes ?? 0), lastRowId: Number(meta?.last_row_id ?? 0) };
-  }
-  async batch(stmts: StmtSpec[]): Promise<void> {
-    if (!stmts.length) return;
-    await this.d1.batch(stmts.map((s) => this.bound(s.sql, s.params)));
+export class DB {
+  constructor(private conn: DatabaseSync) {}
+  prepare(sql: string): Stmt { return this.conn.prepare(sql) as unknown as Stmt; }
+  exec(sql: string): void { this.conn.exec(sql); }
+  pragma(statement: string): void { this.conn.exec(`PRAGMA ${statement}`); }
+  close(): void { this.conn.close(); }
+  /** Returns a function that runs `fn` atomically (BEGIN IMMEDIATE … COMMIT, ROLLBACK on error). */
+  transaction<T>(fn: () => T): () => T {
+    return () => {
+      this.conn.exec("BEGIN IMMEDIATE");
+      try {
+        const out = fn();
+        this.conn.exec("COMMIT");
+        return out;
+      } catch (e) {
+        try { this.conn.exec("ROLLBACK"); } catch { /* already rolled back */ }
+        throw e;
+      }
+    };
   }
 }
 
-const g = globalThis as unknown as { __morphieDbOverride?: Db | null };
+export const BASE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL
+);
 
-/** Test hook: use another Db implementation (the node:sqlite adapter). Pass null to restore D1. */
-export function setDb(override: Db | null): void {
-  g.__morphieDbOverride = override;
-}
+CREATE TABLE IF NOT EXISTS provider_profiles (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  label TEXT NOT NULL,
+  model TEXT NOT NULL,
+  secret_enc TEXT,
+  base_url TEXT,
+  options_enc TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_profiles_user ON provider_profiles(user_id);
 
-export function db(): Db {
-  if (g.__morphieDbOverride) return g.__morphieDbOverride;
-  const binding = cfEnv().DB;
-  if (!binding) throw new Error("The D1 binding `DB` is missing. Check d1_databases in wrangler.jsonc.");
-  return new D1Db(binding);
+CREATE TABLE IF NOT EXISTS user_settings (
+  user_id TEXT PRIMARY KEY,
+  active_profile_id TEXT,
+  json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS user_secrets (
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  value_enc TEXT NOT NULL,
+  PRIMARY KEY (user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'chat',
+  pinned INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  meta TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, id);
+
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  category TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'auto',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_user ON memories(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  chunk_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_docs_user ON documents(user_id);
+
+CREATE TABLE IF NOT EXISTS chunks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  idx INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  embedding BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chunks_user ON chunks(user_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(document_id);
+
+CREATE TABLE IF NOT EXISTS designs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  cursor INTEGER NOT NULL DEFAULT 0,
+  next_version INTEGER NOT NULL DEFAULT 1,
+  revision INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_designs_user ON designs(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS design_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  design_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  json TEXT NOT NULL,
+  prompt TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dv_design ON design_versions(design_id, version);
+`;
+
+const g = globalThis as unknown as { __morphieDb?: DB; __morphieDbPath?: string };
+
+/** One connection per process (kept across Next.js hot reloads). */
+export function db(): DB {
+  const file = path.join(config.dataDir, "morphie.db");
+  if (g.__morphieDb && g.__morphieDbPath === file) return g.__morphieDb;
+  g.__morphieDb?.close();
+  const conn = new DB(new DatabaseSync(file));
+  conn.pragma("journal_mode = WAL");
+  conn.pragma("foreign_keys = ON");
+  conn.pragma("busy_timeout = 5000");
+  conn.exec(BASE_SCHEMA);
+  migrate(conn);
+  g.__morphieDb = conn;
+  g.__morphieDbPath = file;
+  return conn;
 }
 
 export function now(): number {
   return Date.now();
-}
-
-/** Ensure a user row exists (called once per request). */
-export async function touchUser(userId: string): Promise<void> {
-  await db().run("INSERT OR IGNORE INTO users (id, created_at) VALUES (?, ?)", userId, now());
-}
-
-/** Delete every trace of a user (D1 side). Used by "Delete all my data". */
-export async function wipeUser(userId: string): Promise<void> {
-  await db().batch([
-    stmt("DELETE FROM design_versions WHERE design_id IN (SELECT id FROM designs WHERE user_id = ?)", userId),
-    stmt("DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = ?)", userId),
-    ...["designs", "conversations", "chunks", "documents", "memories", "user_secrets", "user_settings", "provider_profiles", "workspace_files"]
-      .map((table) => stmt(`DELETE FROM ${table} WHERE user_id = ?`, userId)),
-  ]);
 }

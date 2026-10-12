@@ -14,7 +14,7 @@ export const workspaceList: ToolDef = {
   modes: ["agent"],
   describeCall: () => "List workspace files",
   async run(_a, ctx) {
-    const files = await wrap(() => listFiles(ctx.userId));
+    const files = await wrap(() => listFiles(ctx.actor));
     if (!files.length) return { text: "The workspace is empty.", summary: "Empty" };
     return { text: files.map((f) => `${f.path} (${f.size} bytes)`).join("\n"), summary: `${files.length} file${files.length === 1 ? "" : "s"}` };
   },
@@ -30,7 +30,7 @@ export const workspaceRead: ToolDef = {
   describeCall: (a) => `Read ${String(a.path ?? "")}`,
   async run(args, ctx) {
     const p = str(args, "path", 120);
-    const text = await wrap(() => readFile(ctx.userId, p));
+    const text = await wrap(() => readFile(ctx.actor, p));
     return { text: text || "(empty file)", summary: `${p} · ${text.length} chars` };
   },
 };
@@ -53,7 +53,7 @@ export const workspaceWrite: ToolDef = {
   async run(args, ctx) {
     const p = str(args, "path", 120);
     const content = typeof args.content === "string" ? args.content : "";
-    const r = await wrap(() => writeFile(ctx.userId, p, content));
+    const r = await wrap(() => writeFile(ctx.actor, p, content));
     return { text: `${r.created ? "Created" : "Updated"} ${r.path} (${r.size} bytes).`, files: [r.path], summary: `${r.created ? "Created" : "Updated"} ${r.path}` };
   },
 };
@@ -68,7 +68,7 @@ export const workspaceDelete: ToolDef = {
   describeCall: (a) => `Delete ${String(a.path ?? "a file")}`,
   async run(args, ctx) {
     const p = str(args, "path", 120);
-    await wrap(() => deleteFile(ctx.userId, p));
+    await wrap(() => deleteFile(ctx.actor, p));
     return { text: `Deleted ${p}.`, summary: `Deleted ${p}` };
   },
 };

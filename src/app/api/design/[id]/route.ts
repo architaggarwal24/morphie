@@ -3,9 +3,9 @@ import { route } from "@/server/http";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const GET = route(async (c) => ({ state: await getDesign(c.userId, c.params.id) }));
+export const GET = route({ auth: "guest" }, async (c) => ({ state: getDesign(c.actor, c.params.id) }));
 
-export const DELETE = route(async (c) => {
-  await deleteDesign(c.userId, c.params.id);
+export const DELETE = route({ auth: "guest" }, async (c) => {
+  deleteDesign(c.actor, c.params.id);
   return { ok: true };
 });

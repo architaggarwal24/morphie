@@ -1,5 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { unzipSync } from "fflate";
+import { config } from "@/server/config";
 import { db } from "@/server/db";
 import type { AgentEvent, DesignEvent } from "@/lib/types";
 import { COMPONENTS } from "@/server/design/components";
@@ -17,7 +20,7 @@ import * as providerModels from "@/app/api/providers/models/route";
 import * as providerTest from "@/app/api/providers/test/route";
 import * as settings from "@/app/api/settings/route";
 import * as workspaceFile from "@/app/api/workspace/file/route";
-import { _resetCoordinator } from "@/server/coordinator";
+import { _resetRateLimits } from "@/server/security";
 import { Mock, startMock } from "./helpers/mock";
 
 const ORIGIN = "http://localhost:3000";
@@ -99,7 +102,9 @@ describe("session, CSRF and bootstrap", () => {
     const s = new Session();
     const res = await s.call(bootstrap.GET, "/api/bootstrap");
     const cookie = res.headers.get("set-cookie")!;
-    expect(cookie).toMatch(/^morphie_uid=[\w-]+\.[\w-]+;.*HttpOnly.*SameSite=Lax/);
+    // an opaque random token (32 bytes, base64url), HttpOnly, SameSite=Lax, and no Max-Age: a guest's cookie ends with the browser session
+    expect(cookie).toMatch(/^morphie_session=[A-Za-z0-9_-]{43};.*HttpOnly.*SameSite=Lax/);
+    expect(cookie).not.toMatch(/Max-Age|Expires/i);
     const data: any = await res.json();
     expect(data.catalog.map((c: any) => c.kind)).toEqual(expect.arrayContaining(["openai", "anthropic", "gemini", "openrouter", "groq", "ollama", "custom"]));
     expect(data.customPresets.some((p: any) => p.id === "codecraft" && p.baseUrl === "https://codecraftapi.com/v1")).toBe(true);
@@ -111,6 +116,8 @@ describe("session, CSRF and bootstrap", () => {
     const forged = new Session(); forged.cookie = "morphie_uid=AAAAAAAAAAAAAAAAAAAAAAAA.forgedsignaturevalue00000000";
     const r = await forged.call(bootstrap.GET, "/api/bootstrap");
     expect(r.headers.get("set-cookie")).toBeTruthy();
+    const forgedSession = new Session(); forgedSession.cookie = "morphie_session=" + "A".repeat(43);
+    expect((await forgedSession.call(bootstrap.GET, "/api/bootstrap")).headers.get("set-cookie")).toMatch(/^morphie_session=[A-Za-z0-9_-]{43};/);
   });
 });
 
@@ -128,7 +135,7 @@ describe("custom OpenAI-compatible provider, configured entirely from the UI", (
     const everything = JSON.stringify((await s.json(bootstrap.GET, "/api/bootstrap")).data);
     expect(everything).not.toContain(KEY);
     expect(everything).not.toContain("t-123");
-    const raw = JSON.stringify(await db().all("SELECT * FROM provider_profiles"));
+    const raw = JSON.stringify(db().prepare("SELECT * FROM provider_profiles").all());
     expect(raw).not.toContain(KEY);
     expect(raw).not.toContain("t-123");
   });
@@ -173,14 +180,14 @@ describe("custom OpenAI-compatible provider, configured entirely from the UI", (
   });
 
   it("can forbid private/local URLs (for public deployments)", async () => {
-    const prev = process.env.MORPHIE_ALLOW_PRIVATE_URLS;
     process.env.MORPHIE_ALLOW_PRIVATE_URLS = "false";
     try {
       const t = new Session();
       const r = await t.json(providers.POST, "/api/providers", { method: "POST", body: customProvider() });
       expect(r.status).toBe(400);
       expect(r.data.error).toMatch(/Private and local/);
-   } finally { process.env.MORPHIE_ALLOW_PRIVATE_URLS = prev; }  });
+    } finally { delete process.env.MORPHIE_ALLOW_PRIVATE_URLS; }
+  });
 
   it("chat streams tokens through the configured provider (custom headers sent) and persists the conversation", async () => {
     mock.calls.length = 0;
@@ -225,7 +232,7 @@ describe("custom OpenAI-compatible provider, configured entirely from the UI", (
     expect(dl.headers.get("x-content-type-options")).toBe("nosniff");
     expect((await s.json(workspaceFile.GET, "/api/workspace/file?path=../../etc/passwd")).status).toBe(400);
     // the other browser sees none of this
-    expect((await intruder.json(workspaceFile.GET, "/api/workspace/file?path=notes/hello.md")).status).toBe(400);
+    expect((await intruder.json(workspaceFile.GET, "/api/workspace/file?path=notes/hello.md")).status).toBe(404);
   });
 
   it("refuses to run two replies in one conversation at once, and unknown conversations 404", async () => {
@@ -308,12 +315,13 @@ describe("documents and data ownership", () => {
     expect((await s.json(documents.GET, "/api/documents")).data.documents).toEqual([]);
     expect((await s.json(settings.GET, "/api/settings")).data.maxSteps).toBe(15);
     expect((await other.json(settings.GET, "/api/settings")).data.maxSteps).toBe(7);
+    expect(fs.existsSync(path.join(config.dataDir, "workspace"))).toBe(true);
   });
 });
 
 describe("rate limiting", () => {
   it("returns 429 with Retry-After once a bucket is exhausted", async () => {
-    _resetCoordinator();
+    _resetRateLimits();
     const s = new Session();
     let last: Response | undefined;
     for (let i = 0; i < 13; i++) last = await s.call(providerTest.POST, "/api/providers/test", { method: "POST", body: { kind: "custom", model: "x", baseUrl: "https://example.com/v1" } });

@@ -1,9 +1,6 @@
 import path from "node:path";
-import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 import { fileURLToPath } from "node:url";
-
-// Lets `next dev` use the same bindings (D1, secrets) as production via wrangler's local emulation. No-op in builds.
-initOpenNextCloudflareForDev();
+import { allHeaders } from "./security-headers.mjs";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 
@@ -20,17 +17,7 @@ const nextConfig = {
     return config;
   },
   async headers() {
-    return [
-      {
-        source: "/:path*",
-        headers: [
-          { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "Referrer-Policy", value: "no-referrer" },
-          { key: "X-Frame-Options", value: "DENY" },
-          { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=()" },
-        ],
-      },
-    ];
+    return allHeaders({ production: process.env.NODE_ENV === "production" });
   },
 };
 export default nextConfig;

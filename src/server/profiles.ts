@@ -2,7 +2,9 @@ import { z } from "zod";
 import type { ProfileView, ProviderKind, ProviderOptions } from "@/lib/types";
 import { LIMITS } from "./config";
 import { decrypt, encrypt, randomId } from "./crypto";
-import { db, now, stmt } from "./db";
+import type { Actor } from "./auth/actor";
+import * as store from "./data/profiles";
+import { now } from "./db";
 import type { ResolvedProfile } from "./providers/factory";
 import { specFor } from "./providers/catalog";
 import { ApiError } from "./http";
@@ -47,10 +49,7 @@ export function sanitizeOptions(raw: unknown): ProviderOptions {
   return o;
 }
 
-interface Row {
-  id: string; user_id: string; kind: string; label: string; model: string;
-  secret_enc: string | null; base_url: string | null; options_enc: string | null; updated_at: number;
-}
+type Row = store.ProfileRow;
 
 function readOptions(row: Row): ProviderOptions {
   if (!row.options_enc) return {};
@@ -74,15 +73,15 @@ function view(row: Row): ProfileView {
   };
 }
 
-export async function listProfiles(userId: string): Promise<{ profiles: ProfileView[]; activeId: string | null }> {
-  const rows = await db().all<Row>("SELECT * FROM provider_profiles WHERE user_id = ? ORDER BY updated_at DESC", userId);
-  const active = await db().get<{ active_profile_id: string | null }>("SELECT active_profile_id FROM user_settings WHERE user_id = ?", userId);
-  const activeId = rows.some((r) => r.id === active?.active_profile_id) ? active!.active_profile_id : null;
+export function listProfiles(actor: Actor): { profiles: ProfileView[]; activeId: string | null } {
+  const rows = store.listProfileRows(actor);
+  const active = store.getActiveProfileId(actor);
+  const activeId = rows.some((r) => r.id === active) ? active : null;
   return { profiles: rows.map(view), activeId };
 }
 
-export async function resolveProfile(userId: string, id: string): Promise<ResolvedProfile | null> {
-  const row = await db().get<Row>("SELECT * FROM provider_profiles WHERE id = ? AND user_id = ?", id, userId);
+export function resolveProfile(actor: Actor, id: string): ResolvedProfile | null {
+  const row = store.getProfileRow(actor, id);
   if (!row) return null;
   return {
     id: row.id, kind: row.kind, label: row.label, model: row.model, apiKey: readKey(row),
@@ -90,9 +89,9 @@ export async function resolveProfile(userId: string, id: string): Promise<Resolv
   };
 }
 
-export async function activeProfile(userId: string): Promise<ResolvedProfile | null> {
-  const { activeId } = await listProfiles(userId);
-  return activeId ? resolveProfile(userId, activeId) : null;
+export function activeProfile(actor: Actor): ResolvedProfile | null {
+  const { activeId } = listProfiles(actor);
+  return activeId ? resolveProfile(actor, activeId) : null;
 }
 
 export interface SaveProfileInput {
@@ -107,17 +106,13 @@ export interface SaveProfileInput {
   activate?: boolean;
 }
 
-export async function saveProfile(userId: string, input: SaveProfileInput): Promise<ProfileView> {
+export function saveProfile(actor: Actor, input: SaveProfileInput): ProfileView {
   const spec = specFor(input.kind);
   if (!spec) throw new ApiError(400, "Unknown provider.", "invalid");
-  const d = db();
-  const existing = input.id
-    ? await d.get<Row>("SELECT * FROM provider_profiles WHERE id = ? AND user_id = ?", input.id, userId)
-    : undefined;
+  const existing = input.id ? store.getProfileRow(actor, input.id) : undefined;
   if (input.id && !existing) throw new ApiError(404, "That provider no longer exists.", "not_found");
   if (!existing) {
-    const count = Number((await d.get<{ c: number }>("SELECT COUNT(*) c FROM provider_profiles WHERE user_id = ?", userId))!.c);
-    if (count >= LIMITS.maxProfiles) throw new ApiError(400, `You can save up to ${LIMITS.maxProfiles} providers. Delete one first.`, "limit");
+    if (store.countProfiles(actor) >= LIMITS.maxProfiles) throw new ApiError(400, `You can save up to ${LIMITS.maxProfiles} providers. Delete one first.`, "limit");
   }
   const id = existing?.id ?? randomId(9);
   const label = (input.label?.trim() || spec.label).slice(0, 60);
@@ -144,28 +139,14 @@ export async function saveProfile(userId: string, input: SaveProfileInput): Prom
   }
   if (options.extraHeaders) options.extraHeaders = Object.fromEntries(Object.entries(options.extraHeaders).filter(([, v]) => v !== ""));
 
-  const t = now();
-  await d.run(`INSERT INTO provider_profiles (id, user_id, kind, label, model, secret_enc, base_url, options_enc, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
-             ON CONFLICT(id) DO UPDATE SET label=?4, model=?5, secret_enc=?6, base_url=?7, options_enc=?8, updated_at=?9`,
-    id, userId, input.kind, label, model, secretEnc, baseUrl, encrypt(JSON.stringify(options)), t);
+  store.upsertProfile(actor, { id, kind: input.kind, label, model, secret_enc: secretEnc, base_url: baseUrl, options_enc: encrypt(JSON.stringify(options)), now: now() });
 
-  if (input.activate !== false && (input.activate || !existing)) await setActive(userId, id);
-  return (await listProfiles(userId)).profiles.find((p) => p.id === id)!;
+  if (input.activate !== false && (input.activate || !existing)) setActive(actor, id);
+  return listProfiles(actor).profiles.find((p) => p.id === id)!;
 }
 
-export async function setActive(userId: string, id: string): Promise<void> {
-  if (!(await resolveProfile(userId, id))) throw new ApiError(404, "That provider no longer exists.", "not_found");
-  await db().run(`INSERT INTO user_settings (user_id, active_profile_id) VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET active_profile_id = excluded.active_profile_id`, userId, id);
-}
-
-export async function deleteProfile(userId: string, id: string): Promise<void> {
-  await db().batch([
-    stmt("DELETE FROM provider_profiles WHERE id = ? AND user_id = ?", id, userId),
-    stmt("UPDATE user_settings SET active_profile_id = NULL WHERE user_id = ? AND active_profile_id = ?", userId, id),
-  ]);
-}
+export const setActive = store.setActiveProfileId;
+export const deleteProfile = store.deleteProfile;
 
 export interface DraftInput {
   profileId?: string;
@@ -178,8 +159,8 @@ export interface DraftInput {
 }
 
 /** Build a ResolvedProfile from unsaved form values, falling back to a saved profile for blank fields (e.g. the key). */
-export async function resolveDraft(userId: string, d: DraftInput): Promise<ResolvedProfile> {
-  const saved = d.profileId ? await resolveProfile(userId, d.profileId) : null;
+export function resolveDraft(actor: Actor, d: DraftInput): ResolvedProfile {
+  const saved = d.profileId ? resolveProfile(actor, d.profileId) : null;
   if (d.profileId && !saved) throw new ApiError(404, "That provider no longer exists.", "not_found");
   const kind = d.kind ?? saved?.kind;
   if (!kind || !specFor(kind)) throw new ApiError(400, "Unknown provider.", "invalid");

@@ -4,16 +4,16 @@ import { CATEGORIES, addMemory, clearMemories, listMemories } from "@/server/mem
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const GET = route(async (c) => ({ memories: await listMemories(c.userId) }));
+export const GET = route({ auth: "guest" }, async (c) => ({ memories: listMemories(c.actor) }));
 
-export const POST = route(async (c) => {
+export const POST = route({ auth: "guest" }, async (c) => {
   const b = await c.body(z.object({ content: z.string().trim().min(3).max(300), category: z.enum(CATEGORIES).default("other") }));
-  const memory = await addMemory(c.userId, b.content, b.category, "manual");
+  const memory = addMemory(c.actor, b.content, b.category, "manual");
   if (!memory) throw new ApiError(400, "That can't be saved: it looks like a secret or an instruction, it's already remembered, or memory is full.", "rejected");
-  return { memory, memories: await listMemories(c.userId) };
+  return { memory, memories: listMemories(c.actor) };
 });
 
-export const DELETE = route(async (c) => {
-  await clearMemories(c.userId);
+export const DELETE = route({ auth: "guest" }, async (c) => {
+  clearMemories(c.actor);
   return { memories: [] };
 });

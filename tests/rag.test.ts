@@ -1,11 +1,12 @@
+import { testActor } from "./helpers/actor";
 import { strToU8, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
-import { touchUser } from "@/server/db";
+
 import { DocumentError, chunkText, ingest, listDocuments, searchDocuments } from "@/server/rag";
 import { parseCsv } from "@/server/rag/loaders";
 
 const user = "user_rag_abcdefghijklmnopq";
-await touchUser(user);
+testActor(user);
 const MB = 1024 * 1024;
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -41,53 +42,53 @@ function makeDocx(paragraphs: string[]): Uint8Array {
 
 describe("loaders", () => {
   it("reads a real PDF page by page and finds text on the right page", async () => {
-    const { doc } = await ingest(user, "handbook.pdf", makePdf(["Onboarding checklist for new engineers", "Expense policy: receipts are required above fifty dollars"]), 5 * MB);
+    const { doc } = await ingest(testActor(user), "handbook.pdf", makePdf(["Onboarding checklist for new engineers", "Expense policy: receipts are required above fifty dollars"]), 5 * MB);
     expect(doc).toMatchObject({ kind: "pdf", name: "handbook.pdf" });
-    const hits = await searchDocuments(user, "expense receipts required");
+    const hits = searchDocuments(testActor(user), "expense receipts required");
     expect(hits[0].document).toBe("handbook.pdf");
     expect(hits[0].text).toMatch(/^\[p\.2\]/);
   });
 
   it("reads a real DOCX", async () => {
-    await ingest(user, "minutes.docx", makeDocx(["Quarterly planning meeting minutes.", "Decision: migrate the billing service to the new queue by March."]), 5 * MB);
-    const hits = await searchDocuments(user, "billing service queue migration");
+    await ingest(testActor(user), "minutes.docx", makeDocx(["Quarterly planning meeting minutes.", "Decision: migrate the billing service to the new queue by March."]), 5 * MB);
+    const hits = searchDocuments(testActor(user), "billing service queue migration");
     expect(hits[0].document).toBe("minutes.docx");
     expect(hits[0].text).toContain("March");
   });
 
   it("turns CSV rows into searchable records and handles quotes", async () => {
     expect(parseCsv('name,notes\n"Ada, L.","said ""hi"""\nBob,plain')).toEqual([["name", "notes"], ["Ada, L.", 'said "hi"'], ["Bob", "plain"]]);
-    await ingest(user, "people.csv", enc("name,team,city\nGrace Hopper,Compilers,Arlington\nAlan Turing,Crypto,Wilmslow\n"), MB);
-    expect((await searchDocuments(user, "who works on crypto in Wilmslow"))[0].text).toContain("Alan Turing");
+    await ingest(testActor(user), "people.csv", enc("name,team,city\nGrace Hopper,Compilers,Arlington\nAlan Turing,Crypto,Wilmslow\n"), MB);
+    expect(searchDocuments(testActor(user), "who works on crypto in Wilmslow")[0].text).toContain("Alan Turing");
   });
 
   it("pretty-prints JSON and rejects invalid JSON", async () => {
-    await ingest(user, "config.json", enc('{"service":{"retries":3,"region":"eu-west"}}'), MB);
-    expect((await searchDocuments(user, "retries region"))[0].document).toBe("config.json");
-    await expect(ingest(user, "broken.json", enc("{nope"), MB)).rejects.toThrow(/valid JSON/);
+    await ingest(testActor(user), "config.json", enc('{"service":{"retries":3,"region":"eu-west"}}'), MB);
+    expect(searchDocuments(testActor(user), "retries region")[0].document).toBe("config.json");
+    await expect(ingest(testActor(user), "broken.json", enc("{nope"), MB)).rejects.toThrow(/valid JSON/);
   });
 
   it("rejects disguised files, oversize files, corrupt PDFs, and decompression bombs", async () => {
-    await expect(ingest(user, "x.pdf", enc("MZ not a pdf"), MB)).rejects.toThrow(/real PDF/);
-    await expect(ingest(user, "x.docx", enc("plain text"), MB)).rejects.toThrow(/real Word/);
-    await expect(ingest(user, "x.txt", makePdf(["hi"]), MB)).rejects.toThrow(/real \.txt/);
-    await expect(ingest(user, "big.txt", new Uint8Array(2 * MB).fill(97), MB)).rejects.toThrow(/too large/);
-    await expect(ingest(user, "corrupt.pdf", enc("%PDF-1.4\nthis is garbage"), MB)).rejects.toThrow(DocumentError);
+    await expect(ingest(testActor(user), "x.pdf", enc("MZ not a pdf"), MB)).rejects.toThrow(/real PDF/);
+    await expect(ingest(testActor(user), "x.docx", enc("plain text"), MB)).rejects.toThrow(/real Word/);
+    await expect(ingest(testActor(user), "x.txt", makePdf(["hi"]), MB)).rejects.toThrow(/real \.txt/);
+    await expect(ingest(testActor(user), "big.txt", new Uint8Array(2 * MB).fill(97), MB)).rejects.toThrow(/too large/);
+    await expect(ingest(testActor(user), "corrupt.pdf", enc("%PDF-1.4\nthis is garbage"), MB)).rejects.toThrow(DocumentError);
     // 150 MB of zeros compresses to ~150 KB: must be refused without being inflated.
     const bomb = zipSync({ "word/document.xml": new Uint8Array(150 * MB) }, { level: 9 });
     expect(bomb.length).toBeLessThan(1 * MB);
-    await expect(ingest(user, "bomb.docx", bomb, 5 * MB)).rejects.toThrow(/too large once unpacked/);
+    await expect(ingest(testActor(user), "bomb.docx", bomb, 5 * MB)).rejects.toThrow(/too large once unpacked/);
   });
 
   it("de-duplicates by content and sanitises names", async () => {
     const bytes = enc("Unique content for the dedupe test, long enough to be indexed.");
-    const a = await ingest(user, "a.txt", bytes, MB);
-    const b = await ingest(user, "b.txt", bytes, MB);
+    const a = await ingest(testActor(user), "a.txt", bytes, MB);
+    const b = await ingest(testActor(user), "b.txt", bytes, MB);
     expect(a.created).toBe(true);
     expect(b.created).toBe(false);
     expect(b.doc.id).toBe(a.doc.id);
-    expect((await ingest(user, "..\\..\\etc/pass wd?.txt", enc("another file with a nasty name"), MB)).doc.name).toBe("pass wd_.txt");
-    expect((await listDocuments(user)).length).toBeGreaterThan(5);
+    expect((await ingest(testActor(user), "..\\..\\etc/pass wd?.txt", enc("another file with a nasty name"), MB)).doc.name).toBe("pass wd_.txt");
+    expect(listDocuments(testActor(user)).length).toBeGreaterThan(5);
   });
 });
 
@@ -104,16 +105,16 @@ describe("chunking & ranking", () => {
 
   it("ranks the relevant passage first and returns nothing for unrelated queries", async () => {
     const u = "user_rank_abcdefghijklmnopq";
-    await touchUser(u);
-    await ingest(u, "cooking.txt", enc("To make sourdough, mix flour, water and salt, then let the starter ferment overnight before baking in a hot dutch oven."), MB);
-    await ingest(u, "travel.txt", enc("Our trip to Lisbon includes a tram ride, pastel de nata tasting and a day trip to Sintra by train."), MB);
-    expect((await searchDocuments(u, "how do I bake sourdough bread"))[0].document).toBe("cooking.txt");
-    expect((await searchDocuments(u, "train to Sintra"))[0].document).toBe("travel.txt");
-    expect(await searchDocuments(u, "quantum chromodynamics lagrangian")).toEqual([]);
-    expect((await searchDocuments(u, "sourdough", { documentIds: [] }))[0].document).toBe("cooking.txt");
+    testActor(u);
+    await ingest(testActor(u), "cooking.txt", enc("To make sourdough, mix flour, water and salt, then let the starter ferment overnight before baking in a hot dutch oven."), MB);
+    await ingest(testActor(u), "travel.txt", enc("Our trip to Lisbon includes a tram ride, pastel de nata tasting and a day trip to Sintra by train."), MB);
+    expect(searchDocuments(testActor(u), "how do I bake sourdough bread")[0].document).toBe("cooking.txt");
+    expect(searchDocuments(testActor(u), "train to Sintra")[0].document).toBe("travel.txt");
+    expect(searchDocuments(testActor(u), "quantum chromodynamics lagrangian")).toEqual([]);
+    expect(searchDocuments(testActor(u), "sourdough", { documentIds: [] })[0].document).toBe("cooking.txt");
   });
 
   it("keeps each user's documents private", async () => {
-    expect(await searchDocuments("someone_else_abcdefghijklmn", "sourdough")).toEqual([]);
+    expect(searchDocuments(testActor("someone_else_abcdefghijklmn"), "sourdough")).toEqual([]);
   });
 });

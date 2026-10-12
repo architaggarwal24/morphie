@@ -1,11 +1,11 @@
-import { setDb } from "@/server/db";
-import { _resetCryptoCache } from "@/server/crypto";
-import { createSqliteDb } from "./helpers/sqliteDb";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-// Every test file gets its own throwaway in-memory database (same schema as D1) and its own secrets.
-process.env.ENCRYPTION_KEY = "test-encryption-key-0123456789abcdef";
-process.env.SESSION_SECRET = "test-session-secret-0123456789abcdef";
-// The suites use mock provider servers on 127.0.0.1.
-process.env.MORPHIE_ALLOW_PRIVATE_URLS = "true";
-_resetCryptoCache();
-setDb(createSqliteDb());
+// Every test file gets its own throwaway data directory (database, keys, workspace).
+process.env.MORPHIE_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "morphie-test-"));
+
+// Tests share one fake network address ("unknown"), so keep the new-identity and per-IP caps out of the way;
+// the tests that exercise those caps set their own values.
+process.env.MORPHIE_MAX_NEW_IDENTITIES_PER_HOUR = "100000";
+process.env.MORPHIE_IP_RATE_PER_MIN = "100000";

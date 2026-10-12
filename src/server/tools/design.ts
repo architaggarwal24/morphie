@@ -24,7 +24,7 @@ export const designWebsite: ToolDef = {
     const brief = str(args, "brief", 2000);
     const designId = typeof args.design_id === "string" && args.design_id.trim() ? args.design_id.trim() : null;
     try {
-      const out = await handleMessage(ctx.userId, designId, brief, ctx.provider, { signal: ctx.signal });
+      const out = await handleMessage(ctx.actor, designId, brief, ctx.provider, { signal: ctx.signal });
       const d = out.state.design;
       return {
         text: `${out.summary}\nDesign "${d.name}" (id: ${out.state.id}, version ${out.state.history.version}) has ${d.sections.length} sections: ${d.sections.map((s) => s.type).join(", ")}. It is available in the Design tab.`,

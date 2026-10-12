@@ -1,9 +1,10 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { testActor } from "./helpers/actor";
+import { describe, expect, it } from "vitest";
 import { DesignAgent, DesignClarification, DesignGenerationError, applyOperations, extractJsonObject, wantsNewDesign } from "@/server/design/agent";
 import { validateDesign } from "@/server/design/schema";
 import * as svc from "@/server/design/service";
 import { THEMES } from "@/server/design/themes";
-import { touchUser } from "@/server/db";
+
 import { COMPONENTS } from "@/server/design/components";
 import { renderPreview, exportReact } from "@/server/design/renderer";
 import { unzipSync } from "fflate";
@@ -142,51 +143,51 @@ describe("DesignAgent", () => {
 
 describe("DesignService", () => {
   const user = "user_design_abcdefghijklm";
-  beforeAll(async () => { await touchUser(user); });
+  testActor(user);
 
   it("creates a project, edits, undoes, redoes, restores, exports and deletes", async () => {
     const p1 = new Scripted([reply({ summary: "Created.", design: base() })]);
-    const a = await svc.handleMessage(user, null, "a saas landing page", p1);
+    const a = await svc.handleMessage(testActor(user), null, "a saas landing page", p1);
     expect(a.changed).toBe(true);
     const id = a.state.id;
     expect(a.state.history).toMatchObject({ version: 1, total: 1, canUndo: false });
 
     const p2 = new Scripted([reply({ summary: "Bigger hero.", operations: [{ op: "update_section", target: "hero", values: { size: "xl" } }] })]);
-    const b = await svc.handleMessage(user, id, "bigger hero", p2);
+    const b = await svc.handleMessage(testActor(user), id, "bigger hero", p2);
     expect(b.state.history).toMatchObject({ version: 2, total: 2, canUndo: true, canRedo: false });
 
-    const noop = await svc.handleMessage(user, id, "bigger hero", new Scripted([reply({ operations: [{ op: "update_section", target: "hero", values: { size: "xl" } }] })]));
+    const noop = await svc.handleMessage(testActor(user), id, "bigger hero", new Scripted([reply({ operations: [{ op: "update_section", target: "hero", values: { size: "xl" } }] })]));
     expect(noop.changed).toBe(false);
     expect(noop.summary).toMatch(/didn't change anything/);
 
-    expect((await svc.undo(user, id)).design.sections.find((s) => s.type === "hero")!.size).toBe("lg");
-    await expect(svc.undo(user, id)).rejects.toThrow(/Nothing to undo/);
-    expect((await svc.redo(user, id)).history.version).toBe(2);
-    await svc.undo(user, id);
+    expect((await svc.undo(testActor(user), id)).design.sections.find((s) => s.type === "hero")!.size).toBe("lg");
+    await expect(svc.undo(testActor(user), id)).rejects.toThrow(/Nothing to undo/);
+    expect((await svc.redo(testActor(user), id)).history.version).toBe(2);
+    await svc.undo(testActor(user), id);
     // a new edit after undo ends the redo branch, and labels keep increasing
-    const c = await svc.handleMessage(user, id, "premium", new Scripted([]));  // theme shortcut: no model call
+    const c = await svc.handleMessage(testActor(user), id, "premium", new Scripted([]));  // theme shortcut: no model call
     expect(c.kind).toBe("theme");
     expect(c.state.history).toMatchObject({ version: 3, total: 2, canRedo: false });
-    expect((await svc.restoreVersion(user, id, 1)).history.version).toBe(1);
+    expect((await svc.restoreVersion(testActor(user), id, 1)).history.version).toBe(1);
 
-    const zip = await svc.exportZip(user, id, "react");
+    const zip = svc.exportZip(testActor(user), id, "react");
     const files = Object.keys(unzipSync(zip.bytes));
     expect(files).toContain("acme-react/src/components/Hero.jsx");
-    expect((await svc.exportDesign(user, id, "html")).files.map((f) => f.path)).toEqual(["index.html", "styles.css"]);
-    await expect(svc.exportDesign(user, id, "pdf")).rejects.toThrow(/Unknown export/);
+    expect(svc.exportDesign(testActor(user), id, "html").files.map((f) => f.path)).toEqual(["index.html", "styles.css"]);
+    expect(() => svc.exportDesign(testActor(user), id, "pdf")).toThrow(/Unknown export/);
 
-    expect(await svc.listDesigns(user)).toHaveLength(1);
-    await svc.deleteDesign(user, id);
-    expect(await svc.listDesigns(user)).toHaveLength(0);
-    await expect(svc.getDesign(user, id)).rejects.toThrow(/no longer exists/);
+    expect(svc.listDesigns(testActor(user))).toHaveLength(1);
+    svc.deleteDesign(testActor(user), id);
+    expect(svc.listDesigns(testActor(user))).toHaveLength(0);
+    expect(() => svc.getDesign(testActor(user), id)).toThrow(/no longer exists/);
   });
 
   it("caps history at 20 versions", async () => {
-    const a = await svc.handleMessage(user, null, "a saas landing page", new Scripted([reply({ design: base() })]));
+    const a = await svc.handleMessage(testActor(user), null, "a saas landing page", new Scripted([reply({ design: base() })]));
     for (let i = 0; i < 24; i++) {
-      await svc.handleMessage(user, a.state.id, `rename ${i}`, new Scripted([reply({ operations: [{ op: "set_name", value: `Acme ${i}` }] })]));
+      await svc.handleMessage(testActor(user), a.state.id, `rename ${i}`, new Scripted([reply({ operations: [{ op: "set_name", value: `Acme ${i}` }] })]));
     }
-    const s = await svc.getDesign(user, a.state.id);
+    const s = svc.getDesign(testActor(user), a.state.id);
     expect(s.history.total).toBe(20);
     expect(s.history.version).toBe(25);
     expect(s.versions.at(-1)!.version).toBe(6);
@@ -194,13 +195,13 @@ describe("DesignService", () => {
 
   it("isolates users", async () => {
     const other = "user_other_abcdefghijklmn";
-    await touchUser(other);
-    const a = await svc.handleMessage(user, null, "a page", new Scripted([reply({ design: base() })]));
-    await expect(svc.getDesign(other, a.state.id)).rejects.toThrow(/no longer exists/);
-    expect(await svc.listDesigns(other)).toEqual([]);
+    testActor(other);
+    const a = await svc.handleMessage(testActor(user), null, "a page", new Scripted([reply({ design: base() })]));
+    expect(() => svc.getDesign(testActor(other), a.state.id)).toThrow(/no longer exists/);
+    expect(svc.listDesigns(testActor(other))).toEqual([]);
   });
 
   it("surfaces a generation failure without touching state", async () => {
-    await expect(svc.handleMessage(user, null, "a page", new Scripted([{ content: "x" }, { content: "x" }, { content: "x" }]))).rejects.toBeInstanceOf(DesignGenerationError);
+    await expect(svc.handleMessage(testActor(user), null, "a page", new Scripted([{ content: "x" }, { content: "x" }, { content: "x" }]))).rejects.toBeInstanceOf(DesignGenerationError);
   });
 });

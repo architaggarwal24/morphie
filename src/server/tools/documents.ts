@@ -21,7 +21,7 @@ export const searchDocs: ToolDef = {
   async run(args, ctx) {
     const query = str(args, "query", 500);
     const k = Math.min(8, Math.max(1, Math.round(Number(args.top_k) || 5)));
-    const hits = await searchDocuments(ctx.userId, query, { topK: k });
+    const hits = searchDocuments(ctx.actor, query, { topK: k });
     if (!hits.length) return { text: `No relevant passages found for "${query}".`, summary: "No matches" };
     return {
       text: hits.map((h, i) => `[${i + 1}] ${h.document}\n${h.text}`).join("\n\n"),
@@ -48,7 +48,7 @@ export const saveMemory: ToolDef = {
   describeCall: (a) => `Remember: “${String(a.fact ?? "").slice(0, 120)}”`,
   async run(args, ctx) {
     const fact = str(args, "fact", 300);
-    const rec = await addMemory(ctx.userId, fact, typeof args.category === "string" ? args.category : "other", "agent");
+    const rec = addMemory(ctx.actor, fact, typeof args.category === "string" ? args.category : "other", "agent");
     if (!rec) throw new ToolError("That wasn't saved: it looks like a secret, an instruction, or it's already remembered.");
     return { text: `Saved: ${rec.content}`, summary: rec.content };
   },

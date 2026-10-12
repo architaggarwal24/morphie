@@ -15,9 +15,9 @@ const body = z.object({
   options: z.unknown().optional(),
 });
 
-export const POST = route(async (c) => {
+export const POST = route({ auth: "guest", rate: { bucket: "provider-test", limit: 12, windowMs: 60_000 } }, async (c) => {
   const b = await c.body(body);
-  const draft = await resolveDraft(c.userId, { ...b, options: b.options as never });
+  const draft = resolveDraft(c.actor, { ...b, options: b.options as never });
   if (!draft.model) return { ok: false, message: "Choose a model first." };
   return testProvider(draft, c.req.signal);
-}, { rate: { bucket: "provider-test", limit: 12, windowMs: 60_000 } });
+});

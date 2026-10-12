@@ -2,17 +2,15 @@
   "name": "morphie",
   "version": "2.0.0",
   "private": true,
-  "description": "Morphie: a multi-provider AI workspace with chat, an autonomous agent, documents, memory and a design studio. Runs on Cloudflare Workers (OpenNext) with D1 and a Durable Object.",
+  "description": "Morphie: a multi-provider AI workspace with chat, an autonomous agent, documents, memory and a design studio.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p worker/tsconfig.json",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
-    "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",
-    "db:migrate:local": "wrangler d1 migrations apply morphie --local",
-    "db:migrate:remote": "wrangler d1 migrations apply morphie --remote"
+    "check:release": "node scripts/release-check.mjs",
+    "release:zip": "node scripts/make-release.mjs && node scripts/release-check.mjs morphie.zip"
   },
   "engines": {
     "node": ">=22.13"
@@ -23,6 +21,7 @@
     "lucide-react": "^1.48.0",
     "mammoth": "^1.13.0",
     "next": "^15.5.26",
+    "nodemailer": "^10.1.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
@@ -33,11 +32,10 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261006.1",
-    "@opennextjs/cloudflare": "^1.0.0",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
     "@types/node": "^26.6.3",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
@@ -46,12 +44,6 @@
     "postcss": "^8.5.28",
     "tailwindcss": "^3.4.19",
     "typescript": "^5.9.3",
-    "vitest": "^5.0.2",
-    "wrangler": "^4.0.0"
-  },
-  "allowScripts": {
-    "esbuild@0.25.4": true,
-    "esbuild@0.28.2": true,
-    "workerd@1.20261006.1": true
+    "vitest": "^5.0.2"
   }
 }

@@ -1,3 +1,4 @@
+import { guardedFetch, securityCause } from "../net";
 import { assertPublicHost, SecurityError } from "../security";
 import { ToolError, str, type ToolDef } from "./types";
 
@@ -26,7 +27,7 @@ export function htmlToText(html: string): { title: string; text: string } {
 }
 
 /** Fetch a public web page. Private networks are blocked regardless of server config, and every redirect is re-checked. */
-export async function fetchPublic(rawUrl: string, signal?: AbortSignal): Promise<{ url: string; status: number; contentType: string; body: string; truncated: boolean }> {
+export async function fetchPublic(rawUrl: string, signal?: AbortSignal, io: { fetch: typeof guardedFetch } = { fetch: guardedFetch }): Promise<{ url: string; status: number; contentType: string; body: string; truncated: boolean }> {
   let url: URL;
   try { url = new URL(rawUrl); } catch { throw new ToolError("That isn't a valid URL."); }
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -40,10 +41,10 @@ export async function fetchPublic(rawUrl: string, signal?: AbortSignal): Promise
     const onAbort = () => ctl.abort();
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      const res = await fetch(url, {
-        redirect: "manual", signal: ctl.signal,
+      const res = await io.fetch(url, {
+        signal: ctl.signal,
         headers: { "user-agent": "Mozilla/5.0 (compatible; MorphieBot/2.0)", accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.5" },
-      });
+      }, { allowPrivate: false });
       if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
         url = new URL(res.headers.get("location")!, url);
         continue;
@@ -67,6 +68,8 @@ export async function fetchPublic(rawUrl: string, signal?: AbortSignal): Promise
     } catch (e) {
       if (e instanceof ToolError) throw e;
       if (signal?.aborted) throw new ToolError("Stopped.");
+      const blocked = securityCause(e);
+      if (blocked) throw new ToolError(`Blocked: ${blocked.message}`);
       throw new ToolError(`Couldn't fetch that page (${ctl.signal.aborted ? "timed out" : "network error"}).`);
     } finally {
       clearTimeout(timer);

@@ -6,7 +6,7 @@ import { assertProviderHostAllowed, createProvider } from "@/server/providers/fa
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const GET = route(async (c) => listProfiles(c.userId));
+export const GET = route({ auth: "guest" }, async (c) => listProfiles(c.actor));
 
 const body = z.object({
   id: z.string().max(40).optional(),
@@ -20,13 +20,13 @@ const body = z.object({
   activate: z.boolean().optional(),
 });
 
-export const POST = route(async (c) => {
+export const POST = route({ auth: "guest", rate: { bucket: "providers", limit: 30, windowMs: 60_000 } }, async (c) => {
   const b = await c.body(body);
   if (!specFor(b.kind)) return Response.json({ error: "Unknown provider.", code: "invalid" }, { status: 400 });
   // Validate the whole configuration (URL rules, key present, options) before anything is stored.
-  const draft = await resolveDraft(c.userId, { profileId: b.id, kind: b.kind, model: b.model, apiKey: b.apiKey, baseUrl: b.baseUrl, label: b.label, options: b.options as never });
+  const draft = resolveDraft(c.actor, { profileId: b.id, kind: b.kind, model: b.model, apiKey: b.apiKey, baseUrl: b.baseUrl, label: b.label, options: b.options as never });
   await assertProviderHostAllowed(draft);
   createProvider(draft);
-  const profile = await saveProfile(c.userId, { ...b, options: draft.options });
-  return { profile, ...(await listProfiles(c.userId)) };
-}, { rate: { bucket: "providers", limit: 30, windowMs: 60_000 } });
+  const profile = saveProfile(c.actor, { ...b, options: draft.options });
+  return { profile, ...listProfiles(c.actor) };
+});

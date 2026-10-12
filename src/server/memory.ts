@@ -1,7 +1,9 @@
 import type { MemoryView } from "@/lib/types";
 import { LIMITS } from "./config";
 import { randomId } from "./crypto";
-import { db, now } from "./db";
+import type { Actor } from "./auth/actor";
+import { now } from "./db";
+import * as store from "./data/memories";
 import type { Provider } from "./providers/types";
 import { tokenize } from "./text";
 
@@ -71,36 +73,31 @@ export function looksMemorable(text: string): boolean {
 
 export { tokenize };
 
-export async function listMemories(userId: string): Promise<MemoryView[]> {
-  return (await db().all<Row>("SELECT * FROM memories WHERE user_id = ? ORDER BY updated_at DESC", userId)).map(toView);
+export function listMemories(actor: Actor): MemoryView[] {
+  return store.listMemoryRows(actor).map(toView);
 }
 
-export async function addMemory(userId: string, content: string, category = "other", source: "auto" | "manual" | "agent" = "auto"): Promise<MemoryView | null> {
+export function addMemory(actor: Actor, content: string, category = "other", source: "auto" | "manual" | "agent" = "auto"): MemoryView | null {
   const text = content.replace(/\s+/g, " ").trim().slice(0, 300);
   if (!text || isSensitive(text) || looksLikeInstruction(text)) return null;
   const cat = (CATEGORIES as readonly string[]).includes(category) ? category : "other";
-  const existing = await listMemories(userId);
+  const existing = listMemories(actor);
   if (existing.some((m) => m.content.toLowerCase() === text.toLowerCase())) return null;
   if (existing.length >= LIMITS.maxMemories) return null;
   const id = randomId(9);
   const t = now();
-  await db().run("INSERT INTO memories (id, user_id, content, category, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, userId, text, cat, source, t, t);
+  store.insertMemory(actor, { id, content: text, category: cat, source, created_at: t, updated_at: t });
   return { id, content: text, category: cat, source, createdAt: t, updatedAt: t };
 }
 
-export async function deleteMemory(userId: string, id: string): Promise<void> {
-  await db().run("DELETE FROM memories WHERE id = ? AND user_id = ?", id, userId);
-}
+export const deleteMemory = store.deleteMemory;
+export const clearMemories = store.clearMemories;
 
-export async function clearMemories(userId: string): Promise<void> {
-  await db().run("DELETE FROM memories WHERE user_id = ?", userId);
-}
-
-export async function searchMemories(userId: string, query: string, limit = 5): Promise<MemoryView[]> {
+export function searchMemories(actor: Actor, query: string, limit = 5): MemoryView[] {
   const q = tokenize(query);
   if (!q.size) return [];
   const scored: Array<[number, MemoryView]> = [];
-  for (const m of await listMemories(userId)) {
+  for (const m of listMemories(actor)) {
     let overlap = 0;
     for (const w of tokenize(m.content)) if (q.has(w)) overlap++;
     if (overlap) scored.push([overlap, m]);
@@ -131,7 +128,7 @@ const EXTRACTION_PROMPT =
   "If nothing is worth remembering, respond with [].";
 
 /** One cheap extra LLM call after a memorable-looking turn. Never throws. */
-export async function rememberFromTurn(userId: string, provider: Provider, userMessage: string, assistantMessage: string, signal?: AbortSignal): Promise<string[]> {
+export async function rememberFromTurn(actor: Actor, provider: Provider, userMessage: string, assistantMessage: string, signal?: AbortSignal): Promise<string[]> {
   if (!looksMemorable(userMessage)) return [];
   try {
     const out = await provider.chat({
@@ -150,7 +147,7 @@ export async function rememberFromTurn(userId: string, provider: Provider, userM
       if (!it || typeof it.memory !== "string") continue;
       const importance = Number(it.importance);
       if (!(importance >= MIN_IMPORTANCE)) continue;
-      const rec = await addMemory(userId, it.memory, String(it.category ?? "other"), "auto");
+      const rec = addMemory(actor, it.memory, String(it.category ?? "other"), "auto");
       if (rec) saved.push(rec.content);
     }
     return saved;

@@ -1,3 +1,4 @@
+import type { Actor } from "../auth/actor";
 import type { AgentEvent, AgentSettings, AssistantMeta, Mode, PlanItem, SourceRef, TimelineItem, ToolStep } from "@/lib/types";
 import { LIMITS } from "../config";
 import { addMessage, getConversation, getMessages, setTitle, titleFrom, updateMessageMeta } from "../conversations";
@@ -11,7 +12,7 @@ import { requestApproval } from "./approvals";
 import { LAST_STEP_NOTICE, systemPrompt, wrapUntrusted } from "./prompts";
 
 export interface RunInput {
-  userId: string;
+  actor: Actor;
   conversationId: string;
   mode: Mode;
   message: string;
@@ -27,8 +28,8 @@ const HISTORY_CHAR_BUDGET = 24_000;
 const MAX_REASONING = 6000;
 const CHAT_MAX_STEPS = 6;
 
-async function historyFor(userId: string, conversationId: string): Promise<ChatMessage[]> {
-  const rows = await getMessages(userId, conversationId, LIMITS.maxHistoryMessages);
+function historyFor(actor: Actor, conversationId: string): ChatMessage[] {
+  const rows = getMessages(actor, conversationId, LIMITS.maxHistoryMessages);
   const out: ChatMessage[] = [];
   let budget = HISTORY_CHAR_BUDGET;
   for (let i = rows.length - 1; i >= 0 && budget > 0; i--) {
@@ -59,17 +60,17 @@ function normalize(res: string | ToolResult): ToolResult {
 }
 
 export async function runAgent(input: RunInput): Promise<void> {
-  const { userId, conversationId, mode, provider, signal, emit } = input;
+  const { actor, conversationId, mode, provider, signal, emit } = input;
   const settings = input.settings;
   const maxSteps = Math.max(2, mode === "agent" ? settings.maxSteps : CHAT_MAX_STEPS);
-  const conv = await getConversation(userId, conversationId);
+  const conv = getConversation(actor, conversationId);
   if (!conv) { emit({ type: "error", message: "That conversation no longer exists.", code: "not_found" }); return; }
 
-  const prior = await historyFor(userId, conversationId);
-  if (!input.skipUserSave) await addMessage(conversationId, "user", input.message);
+  const prior = historyFor(actor, conversationId);
+  if (!input.skipUserSave) addMessage(actor, conversationId, "user", input.message);
 
-  const docs = await hasDocuments(userId);
-  const memories = settings.memory ? await searchMemories(userId, input.message, 5) : [];
+  const docs = hasDocuments(actor);
+  const memories = settings.memory ? searchMemories(actor, input.message, 5) : [];
   const system = systemPrompt(mode, {
     date: new Date().toLocaleDateString("en-GB", { dateStyle: "full" }),
     maxSteps, memoryBlock: formatMemoriesForPrompt(memories), hasDocuments: docs,
@@ -96,7 +97,7 @@ export async function runAgent(input: RunInput): Promise<void> {
     if (e.type === "plan") plan = e.items;
     emit(e);
   };
-  const ctx: ToolContext = { userId, conversationId, mode, signal, settings, provider, emit: ctxEmit };
+  const ctx: ToolContext = { actor, conversationId, mode, signal, settings, provider, emit: ctxEmit };
 
   emit({ type: "start", conversationId, mode, provider: provider.label, model: provider.model });
 
@@ -177,7 +178,7 @@ export async function runAgent(input: RunInput): Promise<void> {
         if (approval) {
           step.status = "waiting";
           emit({ type: "tool_start", step });
-          const req = await requestApproval(userId, signal);
+          const req = requestApproval(actor.userId, signal);
           emit({ type: "approval", id: req.id, stepId: id, tool: tool.name, args: call.arguments, reason: tool.describeCall?.(call.arguments) ?? `Run ${tool.label}` });
           const decision = await req.decision;
           if (signal.aborted) throw new ProviderError("Stopped.");
@@ -187,7 +188,7 @@ export async function runAgent(input: RunInput): Promise<void> {
             continue;
           }
           if (decision.always && !settings.alwaysAllow.includes(tool.name)) {
-            ctx.settings = await saveSettings(userId, { alwaysAllow: [...settings.alwaysAllow, tool.name] });
+            ctx.settings = saveSettings(actor, { alwaysAllow: [...settings.alwaysAllow, tool.name] });
             settings.alwaysAllow = ctx.settings.alwaysAllow;
           }
           step.status = "running";
@@ -234,22 +235,22 @@ export async function runAgent(input: RunInput): Promise<void> {
   if (!finalText && stopped) finalText = "";
   const savedContent = finalText || (stopped ? "*Stopped.*" : errorMessage ? `*${errorMessage}*` : "");
   let messageId: number | null = null;
-  if (savedContent || timeline.length) messageId = await addMessage(conversationId, "assistant", savedContent, meta);
+  if (savedContent || timeline.length) messageId = addMessage(actor, conversationId, "assistant", savedContent, meta);
 
   if (sources.length) emit({ type: "sources", sources: sources.slice(0, 12) });
   if (usage.input || usage.output) emit({ type: "usage", ...usage });
   if (conv.title === "New conversation") {
     const title = titleFrom(input.message);
-    await setTitle(conversationId, title);
+    setTitle(actor, conversationId, title);
     emit({ type: "title", title });
   }
   emit({ type: "done", stopped: stopped || undefined, reason });
 
   if (settings.memory && finalText && !stopped && reason !== "error") {
-    const saved = await rememberFromTurn(userId, provider, input.message, finalText, signal);
+    const saved = await rememberFromTurn(actor, provider, input.message, finalText, signal);
     if (saved.length) {
       emit({ type: "memory", saved });
-      if (messageId) await updateMessageMeta(messageId, { ...meta, memory: saved });
+      if (messageId) updateMessageMeta(actor, conversationId, messageId, { ...meta, memory: saved });
     }
   }
 }

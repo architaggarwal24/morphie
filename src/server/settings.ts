@@ -1,12 +1,13 @@
 import { DEFAULT_AGENT_SETTINGS, type AgentSettings } from "@/lib/types";
 import { config } from "./config";
 import { decrypt, encrypt } from "./crypto";
-import { db } from "./db";
+import type { Actor } from "./auth/actor";
+import * as store from "./data/settings";
 
-export async function getSettings(userId: string): Promise<AgentSettings> {
-  const row = await db().get<{ json: string }>("SELECT json FROM user_settings WHERE user_id = ?", userId);
+export function getSettings(actor: Actor): AgentSettings {
+  const json = store.readSettingsJson(actor);
   let stored: Partial<AgentSettings> = {};
-  try { stored = row ? JSON.parse(row.json) : {}; } catch { /* defaults */ }
+  try { stored = json ? JSON.parse(json) : {}; } catch { /* defaults */ }
   return normalizeSettings({ ...DEFAULT_AGENT_SETTINGS, ...stored });
 }
 
@@ -23,10 +24,9 @@ export function normalizeSettings(s: Partial<AgentSettings>): AgentSettings {
   };
 }
 
-export async function saveSettings(userId: string, patch: Partial<AgentSettings>): Promise<AgentSettings> {
-  const next = normalizeSettings({ ...(await getSettings(userId)), ...patch });
-  await db().run(`INSERT INTO user_settings (user_id, json) VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET json = excluded.json`, userId, JSON.stringify(next));
+export function saveSettings(actor: Actor, patch: Partial<AgentSettings>): AgentSettings {
+  const next = normalizeSettings({ ...getSettings(actor), ...patch });
+  store.writeSettingsJson(actor, JSON.stringify(next));
   return next;
 }
 
@@ -34,17 +34,20 @@ export async function saveSettings(userId: string, patch: Partial<AgentSettings>
 
 export type SecretName = "tavily";
 
-export async function setSecret(userId: string, name: SecretName, value: string): Promise<void> {
-  await db().run(`INSERT INTO user_secrets (user_id, name, value_enc) VALUES (?, ?, ?)
-                ON CONFLICT(user_id, name) DO UPDATE SET value_enc = excluded.value_enc`, userId, name, encrypt(value));
+/**
+ * Secrets are encrypted here, in one place, so that when per-user data keys arrive (and when a guest's secrets
+ * move to an account) this is the single hook where values get re-encrypted under the right key.
+ */
+export function setSecret(actor: Actor, name: SecretName, value: string): void {
+  store.writeSecretEnc(actor, name, encrypt(value));
 }
 
-export async function getSecret(userId: string, name: SecretName): Promise<string | undefined> {
-  const row = await db().get<{ value_enc: string }>("SELECT value_enc FROM user_secrets WHERE user_id = ? AND name = ?", userId, name);
-  if (!row) return undefined;
-  try { return decrypt(row.value_enc); } catch { return undefined; }
+export function getSecret(actor: Actor, name: SecretName): string | undefined {
+  const enc = store.readSecretEnc(actor, name);
+  if (!enc) return undefined;
+  try { return decrypt(enc); } catch { return undefined; }
 }
 
-export async function deleteSecret(userId: string, name: SecretName): Promise<void> {
-  await db().run("DELETE FROM user_secrets WHERE user_id = ? AND name = ?", userId, name);
+export function deleteSecret(actor: Actor, name: SecretName): void {
+  store.deleteSecret(actor, name);
 }

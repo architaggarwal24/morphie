@@ -1,3 +1,4 @@
+import { _rewriteUrlForTests } from "@/server/net";
 import { afterEach, describe, expect, it } from "vitest";
 import { AnthropicProvider } from "@/server/providers/anthropic";
 import { createProvider } from "@/server/providers/factory";
@@ -158,8 +159,8 @@ describe("Gemini", () => {
       { candidates: [{ content: { parts: [{ text: "Hi " }] } }] },
       { candidates: [{ content: { parts: [{ functionCall: { name: "calculator", args: { expression: "1+1" } } }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 3 } },
     ]));
-    const orig = globalThis.fetch;
-    globalThis.fetch = ((u: any, i: any) => orig(String(u).replace("https://generativelanguage.googleapis.com", mock!.url), i)) as typeof fetch;
+    // The transport no longer uses the global fetch, so the fixed Gemini host is redirected at the transport seam instead.
+    _rewriteUrlForTests((u) => new URL(u.toString().replace("https://generativelanguage.googleapis.com", mock!.url)));
     try {
       const p = new GeminiProvider({ apiKey: "gk-1234567", model: "gemini-x" });
       const out = await p.chat({
@@ -171,7 +172,7 @@ describe("Gemini", () => {
       expect(mock.calls[0].url).toContain("gemini-x:streamGenerateContent?alt=sse");
       expect(mock.calls[0].headers["x-goog-api-key"]).toBe("gk-1234567");
       expect(JSON.stringify(mock.calls[0].body.tools)).not.toContain("additionalProperties");
-    } finally { globalThis.fetch = orig; }
+    } finally { _rewriteUrlForTests(undefined); }
   });
 });
 

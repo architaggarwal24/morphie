@@ -1,12 +1,11 @@
 import { z } from "zod";
 import { runAgent } from "@/server/agent/loop";
 import { LIMITS } from "@/server/config";
-import { tryLock } from "@/server/coordinator";
 import { createConversation, deleteMessagesFrom, getConversation, getMessages } from "@/server/conversations";
 import { ApiError, route } from "@/server/http";
 import { activeProvider } from "@/server/providers/active";
 import { getSettings } from "@/server/settings";
-import { sse } from "@/server/sse";
+import { running, sse } from "@/server/sse";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -20,41 +19,28 @@ const body = z.object({
 });
 
 /** Streams AgentEvents as server-sent events. */
-export const POST = route(async (c) => {
+export const POST = route({ auth: "guest", rate: { bucket: "chat", limit: 40, windowMs: 60_000 } }, async (c) => {
   const b = await c.body(body);
-  const provider = await activeProvider(c.userId);
-  const settings = await getSettings(c.userId);
-
-  let conv = b.conversationId ? await getConversation(c.userId, b.conversationId) : null;
+  // Ownership first: someone else's (or a missing) conversation is a 404 before anything else is looked at.
+  let conv = b.conversationId ? getConversation(c.actor, b.conversationId) : null;
   if (b.conversationId && !conv) throw new ApiError(404, "That conversation no longer exists.", "not_found");
-
-  // "This conversation is busy" guard. It lives in the user's Coordinator Durable Object, not in process memory,
-  // so it holds across isolates; the TTL frees it if a run dies without cleaning up.
-  let release: (() => Promise<void>) | null = null;
-  if (conv) {
-    release = await tryLock(c.userId, `conv:${conv.id}`);
-    if (!release) throw new ApiError(409, "This conversation is still working on a reply.", "busy");
+  const provider = await activeProvider(c.actor);
+  const settings = getSettings(c.actor);
+  if (conv && running.has(conv.id)) throw new ApiError(409, "This conversation is still working on a reply.", "busy");
+  if (conv && b.truncateFrom) {
+    const target = getMessages(c.actor, conv.id).find((m) => m.id === b.truncateFrom);
+    if (!target || target.role !== "user") throw new ApiError(400, "Only your own messages can be edited or re-run.", "invalid");
+    deleteMessagesFrom(c.actor, conv.id, b.truncateFrom);
   }
-  try {
-    if (conv && b.truncateFrom) {
-      const target = (await getMessages(c.userId, conv.id)).find((m) => m.id === b.truncateFrom);
-      if (!target || target.role !== "user") throw new ApiError(400, "Only your own messages can be edited or re-run.", "invalid");
-      await deleteMessagesFrom(c.userId, conv.id, b.truncateFrom);
-    }
-    conv ??= await createConversation(c.userId, b.mode);
-    release ??= await tryLock(c.userId, `conv:${conv.id}`);
-  } catch (e) {
-    await release?.();
-    throw e;
-  }
+  conv ??= createConversation(c.actor, b.mode);
   const conversation = conv;
-  const unlock = release;
+  running.add(conversation.id);
 
   return sse(c.req, async (emit, signal) => {
     try {
-      await runAgent({ userId: c.userId, conversationId: conversation.id, mode: conversation.mode, message: b.message, provider, settings, signal, emit });
+      await runAgent({ actor: c.actor, conversationId: conversation.id, mode: conversation.mode, message: b.message, provider, settings, signal, emit });
     } finally {
-      await unlock?.();
+      running.delete(conversation.id);
     }
   });
-}, { rate: { bucket: "chat", limit: 40, windowMs: 60_000 } });
+});

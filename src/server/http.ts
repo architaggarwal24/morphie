@@ -1,7 +1,12 @@
 import { z, ZodType } from "zod";
-import { randomId, sign, verifySig } from "./crypto";
-import { touchUser } from "./db";
-import { checkOrigin, OriginError, rateLimit, SecurityError } from "./security";
+import type { Actor, AuthLevel } from "./auth/actor";
+import { clearLegacyCookie, legacyUserId } from "./auth/legacyCookie";
+import {
+  createGuestUser, purgeSessions, readSessionToken, resolveSession, sessionCookie, startSession, type ResolvedSession,
+} from "./auth/session";
+import { config } from "./config";
+import { NotFoundError } from "./data/errors";
+import { checkOrigin, clientIp, OriginError, rateLimit, SecurityError } from "./security";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public code = "error") {
@@ -9,76 +14,98 @@ export class ApiError extends Error {
   }
 }
 
-export interface Ctx {
+export interface Ctx<A extends AuthLevel = AuthLevel> {
   req: Request;
   url: URL;
-  userId: string;
+  /**
+   * Who is calling. `public` routes get `Actor | null` (they never create an identity); `guest` routes always get
+   * an actor (a guest session is created if needed); `user` routes only run for a logged-in, non-guest user.
+   */
+  actor: A extends "public" ? Actor | null : Actor;
+  /** The resolved session for this request, if any (expiry info, linked guest). */
+  session: ResolvedSession | null;
+  /** Client IP as far as it can be trusted (see MORPHIE_TRUSTED_PROXY), or "unknown". */
+  ip: string;
   /** Dynamic path segments, e.g. { id } for /api/things/[id]. */
   params: Record<string, string>;
+  /** Extra Set-Cookie headers to send with the response (login, logout). */
+  cookies: string[];
   /** Parse and validate the JSON body. */
   body<T>(schema: ZodType<T>, maxBytes?: number): Promise<T>;
 }
 
-export interface RouteOptions {
+/** `auth` is required: leaving it out is a type error, so no route can forget to say who may call it. */
+export interface RouteOptions<A extends AuthLevel> {
+  auth: A;
   rate?: { bucket: string; limit: number; windowMs: number };
 }
 
-const COOKIE = "morphie_uid";
+/** The wrapped handler carries its declared level so tests can verify every route declares one. */
+export type RouteHandler = ((req: Request, routeCtx: { params: Promise<Record<string, string>> }) => Promise<Response>) & { auth: AuthLevel };
 
-function readCookie(req: Request, name: string): string | undefined {
-  const header = req.headers.get("cookie");
-  if (!header) return undefined;
-  for (const part of header.split(";")) {
-    const i = part.indexOf("=");
-    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
-  }
-  return undefined;
-}
-
-/** Signed anonymous session: "<id>.<sig>". Returns the id and, if new, the Set-Cookie header. */
-export function resolveSession(req: Request): { userId: string; setCookie?: string } {
-  const raw = readCookie(req, COOKIE);
-  if (raw) {
-    const dot = raw.lastIndexOf(".");
-    if (dot > 0) {
-      const id = raw.slice(0, dot);
-      if (/^[A-Za-z0-9_-]{16,64}$/.test(id) && verifySig(id, raw.slice(dot + 1))) return { userId: id };
-    }
-  }
-  const id = randomId(18);
-  const https = new URL(req.url).protocol === "https:" || req.headers.get("x-forwarded-proto") === "https";
-  const cookie = `${COOKIE}=${id}.${sign(id)}; Path=/; Max-Age=${60 * 60 * 24 * 365}; HttpOnly; SameSite=Lax${https ? "; Secure" : ""}`;
-  return { userId: id, setCookie: cookie };
-}
-
-function jsonError(status: number, message: string, code: string, extra?: Record<string, string>): Response {
-  return new Response(JSON.stringify({ error: message, code }), {
+function jsonError(status: number, message: string, code: string, cookies: string[], headers: Record<string, string> = {}): Response {
+  const res = new Response(JSON.stringify({ error: message, code }), {
     status,
-    headers: { "content-type": "application/json", "cache-control": "no-store", ...extra },
+    headers: { "content-type": "application/json", "cache-control": "no-store", ...headers },
   });
+  for (const c of cookies) res.headers.append("set-cookie", c);
+  return res;
+}
+
+let lastPurge = 0;
+
+function authenticate(req: Request, level: AuthLevel, ip: string, cookies: string[]): ResolvedSession | null {
+  const token = readSessionToken(req);
+  const existing = token ? resolveSession(token) : null;
+  if (existing) {
+    if (level === "user" && existing.actor.isGuest) throw new ApiError(403, "Sign in to use this.", "account_required");
+    return existing;
+  }
+  if (level === "public") return null;
+  if (level === "user") throw new ApiError(401, "Sign in to use this.", "unauthenticated");
+
+  // guest level: make sure there is a session. First try the one-release legacy cookie shim, then a brand-new guest.
+  const meta = { ip, userAgent: req.headers.get("user-agent") ?? undefined };
+  // REMOVE-LEGACY-SHIM: delete these lines (and src/server/auth/legacyCookie.ts) when the shim is retired.
+  let userId = legacyUserId(req);
+  if (userId) { cookies.push(clearLegacyCookie()); console.info("[auth] legacy cookie migrated"); }
+  if (!userId) {
+    const wait = rateLimit(`newid:${ip}`, config.maxNewIdentitiesPerHour, 3_600_000);
+    if (wait) throw new ApiError(429, `Too many new sessions from your network. Try again in ${Math.ceil(wait / 60)} min.`, "rate_limited");
+    userId = createGuestUser();
+  }
+  const started = startSession(userId, true, meta);
+  cookies.push(sessionCookie(started.token, started, req));
+  const resolved = resolveSession(started.token);
+  if (!resolved) throw new ApiError(500, "Couldn't start a session.", "internal");
+  return resolved;
 }
 
 /**
- * Wraps a route handler with: session, CSRF check, rate limiting, body validation,
- * uniform JSON errors and no-store caching. Handlers may return a Response or any JSON value.
+ * Wraps a route handler with: authentication at the declared level, CSRF check, rate limiting (per user and per IP),
+ * body validation, uniform JSON errors and no-store caching. Handlers may return a Response or any JSON value.
  */
-export function route(handler: (ctx: Ctx) => Promise<unknown>, opts: RouteOptions = {}) {
-  return async (req: Request, routeCtx: { params: Promise<Record<string, string>> }): Promise<Response> => {
-    const { userId, setCookie } = resolveSession(req);
-    const params = (await routeCtx?.params) ?? {};
-    const extra = setCookie ? { "set-cookie": setCookie } : undefined;
+export function route<A extends AuthLevel>(opts: RouteOptions<A>, handler: (ctx: Ctx<A>) => Promise<unknown>): RouteHandler {
+  const wrapped = async (req: Request, routeCtx: { params: Promise<Record<string, string>> }): Promise<Response> => {
+    const cookies: string[] = [];
     try {
+      const params = (await routeCtx?.params) ?? {};
+      const ip = clientIp(req);
       checkOrigin(req);
+      const ipWait = rateLimit(`ip:${ip}`, config.ipRatePerMinute, 60_000);
+      if (ipWait) throw new ApiError(429, `Slow down — try again in ${ipWait}s.`, "rate_limited");
+      const session = authenticate(req, opts.auth, ip, cookies);
+      const actor = session?.actor ?? null;
       if (opts.rate) {
-        const wait = await rateLimit(userId, opts.rate.bucket, opts.rate.limit, opts.rate.windowMs);
-        if (wait) return jsonError(429, `Slow down — try again in ${wait}s.`, "rate_limited", { ...extra, "retry-after": String(wait) });
+        const waitUser = rateLimit(`${opts.rate.bucket}:${actor?.userId ?? ip}`, opts.rate.limit, opts.rate.windowMs);
+        // Rotating cookies must not escape the limit: the same bucket is also counted per IP, with room for shared networks.
+        const waitIp = rateLimit(`${opts.rate.bucket}:ip:${ip}`, opts.rate.limit * 3, opts.rate.windowMs);
+        const wait = Math.max(waitUser, waitIp);
+        if (wait) throw Object.assign(new ApiError(429, `Slow down — try again in ${wait}s.`, "rate_limited"), { retryAfter: wait });
       }
-      await touchUser(userId);
-      const ctx: Ctx = {
-        req,
-        url: new URL(req.url),
-        userId,
-        params,
+      if (Date.now() - lastPurge > 3_600_000) { lastPurge = Date.now(); try { purgeSessions(); } catch { /* best effort */ } }
+      const ctx = {
+        req, url: new URL(req.url), actor, session, ip, params, cookies,
         async body<T>(schema: ZodType<T>, maxBytes = 1_000_000) {
           const text = await req.text();
           if (text.length > maxBytes) throw new ApiError(413, "That request is too large.", "too_large");
@@ -96,24 +123,27 @@ export function route(handler: (ctx: Ctx) => Promise<unknown>, opts: RouteOption
           }
           return parsed.data;
         },
-      };
+      } as unknown as Ctx<A>;
       const result = await handler(ctx);
-      if (result instanceof Response) {
-        if (setCookie) result.headers.append("set-cookie", setCookie);
-        if (!result.headers.has("cache-control")) result.headers.set("cache-control", "no-store");
-        return result;
-      }
-      return new Response(JSON.stringify(result ?? { ok: true }), {
-        headers: { "content-type": "application/json", "cache-control": "no-store", ...extra },
-      });
+      const res = result instanceof Response
+        ? result
+        : new Response(JSON.stringify(result ?? { ok: true }), { headers: { "content-type": "application/json" } });
+      for (const c of cookies) res.headers.append("set-cookie", c);
+      if (!res.headers.has("cache-control")) res.headers.set("cache-control", "no-store");
+      return res;
     } catch (err) {
-      if (err instanceof ApiError) return jsonError(err.status, err.message, err.code, extra);
-      if (err instanceof OriginError) return jsonError(403, err.message, "forbidden", extra);
-      if (err instanceof SecurityError) return jsonError(400, err.message, "invalid", extra);
+      if (err instanceof ApiError) {
+        const retry = (err as ApiError & { retryAfter?: number }).retryAfter;
+        return jsonError(err.status, err.message, err.code, cookies, retry ? { "retry-after": String(retry) } : {});
+      }
+      if (err instanceof NotFoundError) return jsonError(404, err.message, "not_found", cookies);
+      if (err instanceof OriginError) return jsonError(403, err.message, "forbidden", cookies);
+      if (err instanceof SecurityError) return jsonError(400, err.message, "invalid", cookies);
       console.error("[api]", req.method, new URL(req.url).pathname, err);
-      return jsonError(500, "Something went wrong on the server.", "internal", extra);
+      return jsonError(500, "Something went wrong on the server.", "internal", cookies);
     }
   };
+  return Object.assign(wrapped, { auth: opts.auth as AuthLevel });
 }
 
 export { z };
