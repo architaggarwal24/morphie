@@ -225,9 +225,10 @@ describe("release check", () => {
     const bad = forbiddenEntries([
       "morphie/data/morphie.db", "morphie/data/.session_secret", "app/.env", "app/.env.local", "x/morphie.db-wal", "k/server.pem",
       "node_modules/a/b.js", ".next/cache/x", ".git/config", "deep/er/data/workspace/u/notes.md", "data/workspace/u/a.md",
+      "app/.dev.vars", "app/.dev.vars.production", ".open-next/worker.js", "x/.wrangler/state/v3/d1/db.sqlite",
     ]);
-    expect(bad).toHaveLength(11);
-    expect(forbiddenEntries([".env.example", "src/server/db.ts", "README.md", "src/app/api/data/export/route.ts", "src/data/x.ts", "scripts/release-check.mjs"])).toEqual([]);
+    expect(bad).toHaveLength(15);
+    expect(forbiddenEntries([".env.example", "src/server/db.ts", "README.md", "src/app/api/data/export/route.ts", "src/data/x.ts", ".dev.vars.example", "wrangler.jsonc", "worker/index.ts", "scripts/release-check.mjs"])).toEqual([]);
   });
 
   it("the CLI fails on a zip containing data/ and passes a clean one", () => {

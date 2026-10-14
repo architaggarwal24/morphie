@@ -17,3 +17,10 @@ next-env.d.ts
 morphie.zip
 .env.*
 !.env.example
+
+# Cloudflare / OpenNext: build output and local Worker secrets must never be committed
+.open-next
+.wrangler
+.dev.vars
+.dev.vars.*
+!.dev.vars.example

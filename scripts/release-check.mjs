@@ -22,8 +22,11 @@ const FORBIDDEN = [
   [/(^|\/)\.next\//, ".next build output"],
   [/(^|\/)\.git\//, ".git directory"],
   [/\.tsbuildinfo$/, "TypeScript build cache"],
+  [/(^|\/)\.dev\.vars(\..*)?$/, ".dev.vars file (local Worker secrets)"],
+  [/(^|\/)\.open-next\//, ".open-next build output"],
+  [/(^|\/)\.wrangler\//, ".wrangler local state"],
 ];
-const ALLOWED = [/(^|\/)\.env\.example$/];
+const ALLOWED = [/(^|\/)\.env\.example$/, /(^|\/)\.dev\.vars\.example$/];
 
 export function forbiddenEntries(names) {
   const bad = [];
@@ -41,7 +44,7 @@ export function listTree(dir, base = dir, out = []) {
     const full = path.join(dir, e.name);
     const rel = path.relative(base, full).split(path.sep).join("/");
     if (e.isDirectory()) {
-      if (/(^|\/)(node_modules|\.next|\.git)$/.test(rel)) continue; // ignored by the release zip anyway
+      if (/(^|\/)(node_modules|\.next|\.git|\.open-next|\.wrangler)$/.test(rel)) continue; // ignored by the release zip anyway
       if (rel === "data") { out.push("data/"); continue; }
       listTree(full, base, out);
     } else out.push(rel);

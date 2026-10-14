@@ -50,5 +50,16 @@
   "allowScripts": {
     "esbuild@0.28.2": true,
     "workerd@1.20261006.1": true
+  },
+  "overrides": {
+    "postcss": "$postcss",
+    "mammoth": {
+      "argparse": "^2.0.1"
+    },
+    "@node-minify/core": {
+      "glob": "^10.5.0"
+    },
+    "postcss-selector-parser": "^7.1.6",
+    "postcss-nested": "^8.0.1"
   }
 }
