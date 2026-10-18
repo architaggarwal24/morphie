@@ -35,8 +35,8 @@ export function saveSettings(actor: Actor, patch: Partial<AgentSettings>): Agent
 export type SecretName = "tavily";
 
 /**
- * Secrets are encrypted here, in one place, so that when per-user data keys arrive (and when a guest's secrets
- * move to an account) this is the single hook where values get re-encrypted under the right key.
+ * Secrets are encrypted here, in one place, so that when per-user data keys arrive this is the single hook
+ * where values get re-encrypted under the right key.
  */
 export function setSecret(actor: Actor, name: SecretName, value: string): void {
   store.writeSecretEnc(actor, name, encrypt(value));

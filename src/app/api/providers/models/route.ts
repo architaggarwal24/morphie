@@ -16,7 +16,7 @@ const body = z.object({
 });
 
 /** List the models a provider offers, using unsaved form values (a blank key falls back to the saved one). */
-export const POST = route({ auth: "guest", rate: { bucket: "models", limit: 30, windowMs: 60_000 } }, async (c) => {
+export const POST = route({ auth: "user", rate: { bucket: "models", limit: 30, windowMs: 60_000 } }, async (c) => {
   const b = await c.body(body);
   const draft = resolveDraft(c.actor, { ...b, options: b.options as never, model: "x" });
   const spec = specFor(draft.kind)!;

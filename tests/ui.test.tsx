@@ -30,7 +30,9 @@ const tools = [
   { name: "workspace_write", label: "Write file", description: "Writes files.", risk: "confirm", modes: ["agent"] },
 ];
 const bootData = (over: Record<string, unknown> = {}) => ({
-  version: "2.0.0", catalog, customPresets: presets, profiles: [], activeId: null,
+  version: "2.0.0", methods: { email: true, google: false, github: false },
+  session: { user: { email: "ada@example.com", displayName: "Ada" }, expiresAt: Date.now() + 86_400_000, idleExpiresAt: Date.now() + 86_400_000 },
+  catalog, customPresets: presets, profiles: [], activeId: null,
   settings: { maxSteps: 15, approval: "ask", alwaysAllow: [], disabledTools: [], memory: true }, tools,
   search: { user: false, server: false }, conversations: [], server: { allowPrivateUrls: true, maxUploadMb: 10, maxAgentSteps: 30 }, ...over,
 });
@@ -72,6 +74,584 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const withBoot = (data: object) => handlers.unshift((url) => (url === "/api/bootstrap" ? json(data) : undefined));
 const nav = async (name: string) => (await screen.findAllByRole("button", { name }))[0];
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// Logged out: the page and the Chat tab only. Everything else asks for a login first.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+const visitor = (over: Record<string, unknown> = {}) => ({ version: "2.0.0", methods: { email: true, google: true, github: true }, session: null, ...over });
+
+/** Serves the visitor payload until a code is verified, then the account's (as the real server would). */
+function serveLogin(account: Record<string, unknown> = bootData(), methods?: Record<string, boolean>, requestExtra: Record<string, unknown> = {}, sessionExtra: Record<string, unknown> = {}) {
+  let loggedIn = false;
+  handlers.unshift((url, init) => {
+    if (url === "/api/bootstrap") return json(loggedIn ? account : visitor(methods ? { methods } : {}));
+    if (url === "/api/auth/email/request") return json({ ok: true, expiresInMinutes: 10, resendAfterSeconds: 60, ...requestExtra });
+    if (url === "/api/auth/session") return json({ authenticated: false, user: null, methods: visitor().methods, ...sessionExtra });
+    if (url === "/api/auth/email/verify") {
+      const body = JSON.parse(String(init.body));
+      if (body.code !== "123456") return json({ error: "That code didn't work. Check it, or ask for a new one.", code: "invalid_code" }, 400);
+      loggedIn = true;
+      return json({ ok: true, created: true, user: { email: body.email } });
+    }
+    return undefined;
+  });
+}
+
+type User = ReturnType<typeof userEvent.setup>;
+const popup = () => screen.findByRole("dialog", { name: "Log in or sign up" });
+const lockedTab = async (name: string) => (await screen.findAllByRole("button", { name: `${name} (log in required)` }))[0];
+const shellIsInert = () => !!document.querySelector("#main")?.closest("[inert]");
+
+/** Email, then the 6-digit code, with the mouse. */
+async function logInWithEmail(user: User) {
+  const d = within(await popup());
+  await user.type(d.getByLabelText("Email address"), "ada@example.com");
+  await user.click(d.getByRole("button", { name: /Email me a code/ }));
+  await user.type(await d.findByLabelText("6-digit code"), "123456");
+  await user.click(d.getByRole("button", { name: "Log in" }));
+}
+const popupGone = () => waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+/** jsdom has no layout, so the dialog's focus trap (which skips elements with no offsetParent) needs a stand-in. */
+function fakeLayout() {
+  const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetParent");
+  Object.defineProperty(HTMLElement.prototype, "offsetParent", { configurable: true, get() { return (this as HTMLElement).parentElement; } });
+  return () => { if (original) Object.defineProperty(HTMLElement.prototype, "offsetParent", original); else delete (HTMLElement.prototype as { offsetParent?: unknown }).offsetParent; };
+}
+
+describe("logged out: the page and the Chat tab only", () => {
+  it("a visitor gets the page with a working Chat tab, no Settings, and nothing requested beyond bootstrap", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    expect(await screen.findByLabelText("Message")).toBeTruthy();
+    expect((await nav("Chat")).getAttribute("aria-current")).toBe("page");
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull(); // the popup is only ever opened by an action
+    await user.type(screen.getByLabelText("Search chats"), "abc"); // even searching an empty history asks the server nothing
+    await new Promise((r) => setTimeout(r, 400));
+    expect(calls.map((c) => c.url)).toEqual(["/api/bootstrap"]);
+  });
+
+  it("Agent, Design, Documents and Memory are listed; clicking any opens the login popup and the tab does not switch", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    await screen.findByLabelText("Message");
+    for (const name of ["Agent", "Design", "Documents", "Memory"]) {
+      await user.click(await lockedTab(name));
+      const d = await popup();
+      expect(within(d).getByText(new RegExp(`Log in required to open ${name}`))).toBeTruthy();
+      expect(useStore.getState().tab).toBe("chat");
+      expect(screen.getByLabelText("Message")).toBeTruthy();                       // still the Chat composer
+      expect((await nav("Chat")).getAttribute("aria-current")).toBe("page");
+      await user.keyboard("{Escape}");
+      await popupGone();
+    }
+    expect(calls.map((c) => c.url)).toEqual(["/api/bootstrap"]);
+  });
+
+  it("locked tabs announce that a login is required and that they open a dialog; Chat does not", async () => {
+    withBoot(visitor());
+    render(<App />);
+    await screen.findByLabelText("Message");
+    for (const name of ["Agent", "Design", "Documents", "Memory"]) {
+      const b = await lockedTab(name);
+      expect(b.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(b.textContent).toContain("log in required");
+    }
+    const chat = await nav("Chat");
+    expect(chat.getAttribute("aria-haspopup")).toBeNull();
+    expect(chat.textContent).not.toContain("log in required");
+  });
+
+  it("the theme toggle keeps working", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    await screen.findByLabelText("Message");
+    await user.click((await screen.findAllByRole("button", { name: /^Theme: system/ }))[0]);
+    expect(useStore.getState().theme).toBe("light");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("'Login / Sign up' replaces Settings in the rail; Settings appears once logged in", async () => {
+    const user = userEvent.setup();
+    serveLogin();
+    render(<App />);
+    const login = await nav("Login / Sign up");
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+    await user.click(login);
+    await logInWithEmail(user);
+    await popupGone();
+    expect(await nav("Settings")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Login / Sign up" })).toBeNull();
+    expect(await screen.findByText("Connect your first model")).toBeTruthy(); // a brand-new account with nothing pending starts at Providers
+  });
+});
+
+describe("the login popup", () => {
+  let restoreLayout = () => {};
+  beforeEach(() => { restoreLayout = fakeLayout(); });
+  afterEach(() => restoreLayout());
+
+  it("is a labelled modal dialog over a dimmed, blurred page whose background is inert", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    await screen.findByLabelText("Message");
+    expect(shellIsInert()).toBe(false);
+    await user.click(await lockedTab("Agent"));
+    const d = await popup();
+    expect(d.getAttribute("aria-modal")).toBe("true");
+    expect(d.getAttribute("aria-labelledby")).toBeTruthy();
+    expect(within(d).getByRole("heading", { name: "Log in or sign up" })).toBeTruthy();
+    expect(d.getAttribute("aria-describedby")).toBeTruthy();                       // says why it appeared
+    const scrim = d.parentElement!.firstElementChild!;
+    expect(scrim.className).toMatch(/bg-black\/50/);                               // dimmed
+    expect(scrim.className).toMatch(/backdrop-blur/);                              // blurred
+    expect(shellIsInert()).toBe(true);                                             // page behind: not clickable, not focusable, hidden from assistive tech
+    expect(document.querySelector("#main")!.closest("[inert]")!.contains(d)).toBe(false);
+    await user.keyboard("{Escape}");
+    await popupGone();
+    expect(shellIsInert()).toBe(false);
+  });
+
+  it("closes with Esc, an outside click or the X, and each time focus returns to the control that opened it", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    await screen.findByLabelText("Message");
+    const close = {
+      Escape: async () => { await user.keyboard("{Escape}"); },
+      "an outside click": async (d: HTMLElement) => { await user.click(d.parentElement!.firstElementChild!); },
+      "the X": async (d: HTMLElement) => { await user.click(within(d).getByRole("button", { name: "Close" })); },
+    };
+    for (const [how, run] of Object.entries(close)) {
+      const trigger = await lockedTab("Agent");
+      await user.click(trigger);
+      const d = await popup();
+      expect(within(d).getByLabelText("Email address")).toBe(document.activeElement); // focus moves in
+      await run(d);
+      await popupGone();
+      expect(document.activeElement, `after closing with ${how}`).toBe(trigger);
+      expect(useStore.getState().tab).toBe("chat");
+      expect(useStore.getState().pendingTab).toBeNull();                          // abandoning the popup abandons the request
+    }
+  });
+
+  it("traps focus: Tab and Shift+Tab cycle inside the dialog and never reach the page behind", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    await screen.findByLabelText("Message");
+    await user.click(await lockedTab("Memory"));
+    const d = await popup();
+    const seen = new Set<Element>();
+    for (let i = 0; i < 9; i++) { await user.tab(); expect(d.contains(document.activeElement), `Tab #${i + 1}`).toBe(true); seen.add(document.activeElement!); }
+    expect(seen.size).toBeGreaterThan(2);                                          // it really cycles through several controls
+    for (let i = 0; i < 9; i++) { await user.tab({ shift: true }); expect(d.contains(document.activeElement), `Shift+Tab #${i + 1}`).toBe(true); }
+  });
+
+  it("walks through email then a 6-digit code, and shows a wrong code as an alert without leaving", async () => {
+    const user = userEvent.setup();
+    serveLogin();
+    render(<App />);
+    await user.click(await lockedTab("Agent"));
+    const d = within(await popup());
+    expect(d.queryByLabelText("6-digit code")).toBeNull();                          // step 1: email only
+    const send = d.getByRole("button", { name: /Email me a code/ }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    await user.type(d.getByLabelText("Email address"), "ada@example.com");
+    await user.click(send);
+    expect(calls.find((c) => c.url === "/api/auth/email/request")!.body).toEqual({ email: "ada@example.com" });
+    const code = await d.findByLabelText("6-digit code");                           // step 2
+    expect(document.activeElement).toBe(code);
+    expect(d.getByText(/If that address can receive email/)).toBeTruthy();           // never says whether the address has an account
+    expect((d.getByRole("button", { name: "Log in" }) as HTMLButtonElement).disabled).toBe(true); // needs all six digits
+    await user.type(code, "000000");
+    await user.click(d.getByRole("button", { name: "Log in" }));
+    expect((await d.findByRole("alert")).textContent).toMatch(/That code didn't work/);
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(useStore.getState().session).toBeNull();
+  });
+
+  describe("when no code arrives", () => {
+    const askForCode = async (user: User) => {
+      await user.click(await nav("Login / Sign up"));
+      const d = within(await popup());
+      await user.type(d.getByLabelText("Email address"), "ada@example.com");
+      await user.click(d.getByRole("button", { name: /Email me a code/ }));
+      await d.findByLabelText("6-digit code");
+      return d;
+    };
+
+    it("in development it says plainly that nothing is emailed and where the code is", async () => {
+      const user = userEvent.setup();
+      serveLogin(bootData(), undefined, { delivery: "console" });
+      render(<App />);
+      const d = await askForCode(user);
+      expect(d.getByText(/no email is sent/)).toBeTruthy();
+      expect(d.getByText("[email:dev]")).toBeTruthy();
+      expect(d.getByText(/terminal where the server is running/)).toBeTruthy();
+      expect(d.queryByText(/is on its way/)).toBeNull();                              // no more waiting for an email that will never come
+      expect(d.queryByRole("alert")).toBeNull();
+      expect(calls.some((c) => c.url === "/api/auth/session")).toBe(false);          // nothing to double-check: it is not a failure
+    });
+
+    it("a normal send keeps the usual wording and no warning", async () => {
+      const user = userEvent.setup();
+      serveLogin();
+      render(<App />);
+      const d = await askForCode(user);
+      expect(d.getByText(/If that address can receive email, a 6-digit code is on its way/)).toBeTruthy();
+      expect(d.queryByText(/no email is sent/)).toBeNull();
+      expect(d.queryByRole("alert")).toBeNull();
+    });
+
+    it("when the server already knows its mail is failing, the popup says so right away and points to Google/GitHub", async () => {
+      const user = userEvent.setup();
+      serveLogin(bootData(), undefined, { delivery: "failing" });
+      render(<App />);
+      const d = await askForCode(user);
+      const alert = await d.findByRole("alert");
+      expect(alert.textContent).toMatch(/couldn't send the email just now/);
+      expect(alert.textContent).toMatch(/continue with Google or GitHub/);
+      expect(alert.textContent).toMatch(/reason is in its log/);                      // for whoever runs the server; no config details shown to visitors
+      expect(alert.textContent).not.toMatch(/SMTP|MORPHIE_|password/i);
+    });
+
+    it("a failure that only shows up a few seconds later is noticed, and clears again if the later check says it's fine", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+        serveLogin(bootData(), undefined, {}, { emailDelivery: "failing" });          // the answer was fine; the send failed after it
+        render(<App />);
+        const d = await askForCode(user);
+        expect(d.queryByRole("alert")).toBeNull();
+        await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+        expect((await d.findByRole("alert")).textContent).toMatch(/couldn't send the email just now/);
+        // the next check finds the mail working again (e.g. the retry went through): the warning goes away
+        handlers.unshift((url) => (url === "/api/auth/session" ? json({ authenticated: false, user: null, methods: visitor().methods }) : undefined));
+        await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+        await waitFor(() => expect(d.queryByRole("alert")).toBeNull());
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("asking for a different address starts clean", async () => {
+      const user = userEvent.setup();
+      serveLogin(bootData(), undefined, { delivery: "failing" });
+      render(<App />);
+      const d = await askForCode(user);
+      await d.findByRole("alert");
+      await user.click(d.getByRole("button", { name: "Use a different address" }));
+      expect(d.queryByRole("alert")).toBeNull();
+      expect(document.activeElement).toBe(d.getByLabelText("Email address"));
+    });
+  });
+
+  it("offers Continue with Google / GitHub only when the server has them", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor({ methods: { email: true, google: true, github: false } }));
+    render(<App />);
+    await user.click(await nav("Login / Sign up"));
+    const d = within(await popup());
+    expect(d.getByRole("link", { name: "Continue with Google" }).getAttribute("href")).toBe("/api/auth/oauth/google/start?returnTo=/");
+    expect(d.queryByRole("link", { name: "Continue with GitHub" })).toBeNull();
+    expect(d.getByLabelText("Email address")).toBeTruthy();
+  });
+
+  it("with only a provider configured there is no email form, and with nothing configured it says so", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor({ methods: { email: false, google: false, github: true } }));
+    const first = render(<App />);
+    await user.click(await nav("Login / Sign up"));
+    let d = within(await popup());
+    expect(d.queryByLabelText("Email address")).toBeNull();
+    expect(d.getByRole("link", { name: "Continue with GitHub" })).toBeTruthy();
+    first.unmount();
+
+    handlers = []; useStore.setState(initialStore, true);
+    withBoot(visitor({ methods: { email: false, google: false, github: false } }));
+    render(<App />);
+    await user.click(await nav("Login / Sign up"));
+    d = within(await popup());
+    expect(d.getByText(/Login isn't set up on this server/)).toBeTruthy();
+  });
+
+  it("works from the keyboard alone: reach a locked tab, Enter, type the address, Enter, type the code, Enter", async () => {
+    const user = userEvent.setup();
+    serveLogin(bootData({ profiles: [profile()], activeId: "p1" }));
+    render(<App />);
+    (await lockedTab("Agent")).focus();                                              // arrived by Tab
+    await user.keyboard("{Enter}");
+    const d = within(await popup());
+    expect(document.activeElement).toBe(d.getByLabelText("Email address"));
+    await user.keyboard("ada@example.com{Enter}");
+    await waitFor(() => expect(document.activeElement).toBe(d.getByLabelText("6-digit code")));
+    await user.keyboard("123456{Enter}");
+    await popupGone();
+    expect(await screen.findByLabelText("Task for the agent")).toBeTruthy();         // the Agent tab it asked for
+    expect(useStore.getState().session?.user.email).toBe("ada@example.com");
+  });
+});
+
+describe("chat while logged out", () => {
+  let restoreLayout = () => {};
+  beforeEach(() => { restoreLayout = fakeLayout(); });
+  afterEach(() => restoreLayout());
+
+  it("the composer is a normal text box: type, Shift+Enter for a new line, no popup, no requests", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    const box = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
+    await user.type(box, "first line{Shift>}{Enter}{/Shift}second line");
+    expect(box.value).toBe("first line\nsecond line");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(calls.map((c) => c.url)).toEqual(["/api/bootstrap"]);
+  });
+
+  it("Send, Enter and the command palette each open the popup and keep the draft", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    const box = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
+    await user.type(box, "keep me");
+
+    await user.click(screen.getByRole("button", { name: "Send" }));                  // the button
+    await popup();
+    expect(box.value).toBe("keep me");
+    await user.keyboard("{Escape}"); await popupGone();
+
+    await user.click(box); await user.keyboard("{Enter}");                             // Enter in the box
+    await popup();
+    expect(box.value).toBe("keep me");
+    await user.keyboard("{Escape}"); await popupGone();
+    expect(document.activeElement).toBe(box);                                         // focus is back in the draft
+
+    await user.keyboard("{Control>}k{/Control}");                                     // the palette
+    await user.type(await screen.findByLabelText("Search commands"), "send");
+    await user.keyboard("{Enter}");
+    await popup();
+    expect(box.value).toBe("keep me");
+    await user.keyboard("{Escape}"); await popupGone();
+    expect(box.value).toBe("keep me");
+
+    expect(calls.some((c) => c.url === "/api/chat")).toBe(false);                     // nothing was sent, ever
+  });
+
+  it("after login the draft is restored and NOT sent: it goes only when Send is pressed", async () => {
+    const user = userEvent.setup();
+    serveLogin(bootData({ profiles: [profile()], activeId: "p1" }));
+    const sse = sseResponse();
+    handlers.push((url, init) => (url === "/api/chat" && init.method === "POST" ? sse.response : undefined));
+    render(<App />);
+    const box = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
+    await user.type(box, "hello there");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await logInWithEmail(user);
+    await popupGone();
+    expect(await screen.findByRole("button", { name: /Gateway/ })).toBeTruthy();       // the account's data has loaded (its provider is in the chip)
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe("hello there"); // restored, still on Chat
+    expect(useStore.getState().tab).toBe("chat");
+    expect(calls.some((c) => c.url === "/api/chat")).toBe(false);                     // not auto-sent
+
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(calls.find((c) => c.url === "/api/chat")!.body).toMatchObject({ message: "hello there", mode: "chat" }));
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe("");
+    await act(async () => { sse.push({ type: "done", reason: "complete" }); sse.close(); });
+  });
+
+  it("the provider chip ('Connect a provider') opens the popup, and after login provider setup resumes", async () => {
+    const user = userEvent.setup();
+    serveLogin(bootData({ profiles: [] }));
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /Connect a provider/ }));
+    const d = await popup();
+    expect(within(d).getByText(/Log in required to open Settings/)).toBeTruthy();
+    expect(useStore.getState().tab).toBe("chat");
+    await logInWithEmail(user);
+    await popupGone();
+    expect(await screen.findByText("Connect your first model")).toBeTruthy();
+    expect(useStore.getState().tab).toBe("settings");
+    expect(useStore.getState().settingsSection).toBe("providers");
+  });
+
+  it("a suggestion card puts its prompt in the composer and opens the popup: nothing is sent", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /Do some maths/ }));
+    await popup();
+    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toMatch(/18% of 74,500/);
+    expect(calls.some((c) => c.url === "/api/chat")).toBe(false);
+  });
+});
+
+describe("the command palette while logged out", () => {
+  it("navigation and action commands open the popup, 'Log in or sign up' is offered, and Settings is not", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    await screen.findByLabelText("Message");
+    for (const [query, expected] of [["go to agent", /Log in required to open Agent/], ["new design", /Log in required to open Design/], ["go to memory", /Log in required to open Memory/], ["add a provider", /Log in required to open Settings/]] as const) {
+      await user.keyboard("{Control>}k{/Control}");
+      await user.type(await screen.findByLabelText("Search commands"), query);
+      await user.keyboard("{Enter}");
+      expect(within(await popup()).getByText(expected)).toBeTruthy();
+      expect(useStore.getState().tab).toBe("chat");
+      expect(screen.queryByLabelText("Search commands")).toBeNull();                 // the palette made way for it
+      await user.keyboard("{Escape}"); await popupGone();
+    }
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(await screen.findByLabelText("Search commands"), "log in");
+    expect(screen.getByRole("option", { name: /Log in or sign up/ })).toBeTruthy();
+    await user.clear(screen.getByLabelText("Search commands"));
+    await user.type(screen.getByLabelText("Search commands"), "settings");
+    expect(screen.queryByRole("option", { name: /Open Settings/ })).toBeNull();
+  });
+
+  it("theme commands work and do not open the popup", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    await screen.findByLabelText("Message");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(await screen.findByLabelText("Search commands"), "dark");
+    await user.keyboard("{Enter}");
+    expect(useStore.getState().theme).toBe("dark");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("commands that only concern the Chat tab (Go to Chat, New chat) just work", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    render(<App />);
+    await screen.findByLabelText("Message");
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(await screen.findByLabelText("Search commands"), "new chat");
+    await user.keyboard("{Enter}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(useStore.getState().tab).toBe("chat");
+  });
+});
+
+describe("after login the pending action resumes", () => {
+  it("opens the tab that was asked for, loads the data and closes the popup", async () => {
+    const user = userEvent.setup();
+    serveLogin(bootData({ profiles: [profile()], activeId: "p1", conversations: [{ id: "c9", title: "Old chat", mode: "chat", pinned: false, updatedAt: Date.now(), createdAt: 1 }] }));
+    render(<App />);
+    await user.click(await lockedTab("Documents"));
+    await logInWithEmail(user);
+    await popupGone();
+    expect(await screen.findByRole("heading", { name: "Documents" })).toBeTruthy();
+    expect(useStore.getState().tab).toBe("documents");
+    expect(useStore.getState().conversations.map((c) => c.id)).toEqual(["c9"]);       // the account's data is loaded
+    expect(useStore.getState().loginOpen).toBe(false);
+    expect(useStore.getState().pendingTab).toBeNull();
+    expect(calls.filter((c) => c.url === "/api/bootstrap")).toHaveLength(2);          // once as a visitor, once as the account
+  });
+
+  it("Google/GitHub: only { tab, draft } is kept in sessionStorage across the redirect, and it is restored (then removed) on return", async () => {
+    const user = userEvent.setup();
+    withBoot(visitor());
+    const first = render(<App />);
+    await user.type(await screen.findByLabelText("Message"), "my draft");
+    await user.click(await lockedTab("Agent"));
+    const google = within(await popup()).getByRole("link", { name: "Continue with Google" });
+    google.addEventListener("click", (e) => e.preventDefault());                       // jsdom can't navigate away
+    await user.click(google);
+    const stored = sessionStorage.getItem("morphie.login")!;
+    expect(JSON.parse(stored)).toEqual({ tab: "agent", draft: "my draft" });
+    expect(sessionStorage.length).toBe(1);                                             // nothing else
+    expect(stored).not.toMatch(/ada@|session|token|code/i);
+
+    // …the provider sends them back to a fresh page load, now signed in
+    first.unmount(); handlers = []; useStore.setState(initialStore, true);
+    withBoot(bootData({ profiles: [profile()], activeId: "p1" }));
+    render(<App />);
+    expect(await screen.findByLabelText("Task for the agent")).toBeTruthy();           // the tab it asked for
+    expect(useStore.getState().drafts.chat).toBe("my draft");                          // the draft is back
+    expect(sessionStorage.getItem("morphie.login")).toBeNull();                        // and gone from storage
+    expect(calls.some((c) => c.url === "/api/chat")).toBe(false);
+    await user.click(await nav("Chat"));
+    expect((await screen.findByLabelText("Message") as HTMLTextAreaElement).value).toBe("my draft");
+  });
+
+  it("a Google/GitHub login that fails still gives the draft back, explains why, and cleans the address", async () => {
+    sessionStorage.setItem("morphie.login", JSON.stringify({ tab: "agent", draft: "do not lose me" }));
+    history.replaceState(null, "", "/?auth_error=denied");
+    withBoot(visitor());
+    render(<App />);
+    expect(((await screen.findByLabelText("Message")) as HTMLTextAreaElement).value).toBe("do not lose me");
+    expect(await screen.findByText("Login was cancelled.")).toBeTruthy();
+    expect(useStore.getState().tab).toBe("chat");                                       // not logged in, so still only Chat
+    expect(sessionStorage.getItem("morphie.login")).toBeNull();
+    expect(location.search).toBe("");
+  });
+
+  it("ignores anything unexpected in the stored redirect state", async () => {
+    sessionStorage.setItem("morphie.login", JSON.stringify({ tab: "../../admin", draft: 42, extra: "x" }));
+    withBoot(bootData({ profiles: [profile()], activeId: "p1" }));
+    render(<App />);
+    expect(await screen.findByLabelText("Message")).toBeTruthy();
+    expect(useStore.getState().tab).toBe("chat");
+    expect(useStore.getState().drafts.chat).toBe("");
+    expect(sessionStorage.getItem("morphie.login")).toBeNull();
+  });
+});
+
+describe("logged in vs session ends", () => {
+  it("signed in there is no login item or popup, and Settings → Account has the email, Sign out and Sign out everywhere (no login form)", async () => {
+    const user = userEvent.setup();
+    withBoot(bootData({ profiles: [profile()], activeId: "p1" }));
+    render(<App />);
+    await screen.findByLabelText("Message");
+    expect(screen.queryByRole("button", { name: "Login / Sign up" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /log in required/ })).toBeNull();
+    await user.click(await nav("Settings"));
+    await user.click(await screen.findByRole("button", { name: "Account" }));
+    expect(await screen.findByText("ada@example.com")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign out everywhere" })).toBeTruthy();
+    expect(screen.queryByLabelText("Email address")).toBeNull();
+  });
+
+  it("when the server answers 401 mid-session the page drops back to Chat as a visitor, and nothing of the account stays in memory", async () => {
+    const user = userEvent.setup();
+    withBoot(bootData({ profiles: [profile()], activeId: "p1", conversations: [{ id: "c9", title: "Private chat", mode: "chat", pinned: false, updatedAt: Date.now(), createdAt: 1 }] }));
+    handlers.push((url, init) => (url === "/api/settings" && init.method === "PUT" ? json({ error: "Sign in to use this.", code: "unauthenticated" }, 401) : undefined));
+    render(<App />);
+    await user.click(await nav("Settings"));
+    useDesign.setState({ designs: [{ id: "d1", name: "Secret design", version: 1, updatedAt: 1 }] as never, loaded: true });
+    await act(async () => { await useStore.getState().setSettings({ maxSteps: 3 }); });
+    expect(await nav("Login / Sign up")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+    expect(await screen.findByLabelText("Message")).toBeTruthy();                      // Chat, as a visitor
+    expect(useStore.getState().session).toBeNull();
+    expect(useStore.getState().conversations).toEqual([]);
+    expect(useStore.getState().profiles).toEqual([]);
+    expect(useDesign.getState().designs).toEqual([]);
+    expect(screen.queryByText("Private chat")).toBeNull();
+    expect(await screen.findByText(/You've been logged out/)).toBeTruthy();
+  });
+});
+
+describe("dialogs", () => {
+  it("keep focus where the user is typing when the page behind re-renders (a toast appearing or expiring)", async () => {
+    const user = userEvent.setup();
+    withBoot(bootData());
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: /^OpenAI-compatible$/ }));
+    const key = within(await screen.findByRole("dialog")).getByLabelText("API key");
+    await user.type(key, "sk-");
+    await act(async () => { useStore.getState().toast("ok", "Logged in."); });       // re-renders the page behind, handing the dialog a new onClose
+    await user.keyboard("secret");                                                    // keeps typing wherever focus is (user.type would click the field and hide a focus jump)
+    expect(document.activeElement).toBe(key);
+    expect((key as HTMLInputElement).value).toBe("sk-secret");
+  });
+});
 
 describe("first run & provider setup", () => {
   it("lands on Settings → Providers when nothing is connected", async () => {

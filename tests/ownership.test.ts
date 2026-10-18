@@ -1,24 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it, beforeAll, beforeEach } from "vitest";
-import * as bootstrap from "@/app/api/bootstrap/route";
+import * as emailRequest from "@/app/api/auth/email/request/route";
+import * as emailVerify from "@/app/api/auth/email/verify/route";
+import { _resetTransportForTests, transport, type MemoryTransport } from "@/server/email";
 import { _resetRateLimits } from "@/server/security";
 import { Client } from "./helpers/client";
 import { CASES, EXEMPT, actorOf, seedResources, snapshot, type Case, type Resources } from "./helpers/ownership";
-import { makeUser, signIn } from "./helpers/users";
-
-const API = path.resolve("src/app/api");
-const VERBS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
-
-function discover(dir = API, out: string[] = []): string[] {
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    const f = path.join(dir, e.name);
-    if (e.isDirectory()) discover(f, out); else if (e.name === "route.ts") out.push(f);
-  }
-  return out.sort();
-}
-const patternOf = (file: string) => "/api/" + path.relative(API, path.dirname(file)).split(path.sep).filter(Boolean).join("/");
-const routePattern = (file: string) => patternOf(file).replace(/\/$/, "");
+import { discoverRouteFiles as discover, routePattern, VERBS } from "./helpers/routes";
+import { accountClient } from "./helpers/users";
 
 const files = discover();
 const modules = new Map<string, Record<string, any>>();
@@ -30,14 +20,14 @@ describe("every route declares who may call it", () => {
     expect(files.length).toBeGreaterThanOrEqual(25);
   });
 
-  it("every exported HTTP handler is built by route() with an auth level of public, guest or user", () => {
+  it("every exported HTTP handler is built by route() with an auth level of public or user", () => {
     const problems: string[] = [];
     for (const [pattern, mod] of modules) {
       const exported = VERBS.filter((v) => v in mod);
       if (!exported.length) problems.push(`${pattern}: exports no HTTP handler`);
       for (const v of exported) {
         const auth = mod[v]?.auth;
-        if (!["public", "guest", "user"].includes(auth)) problems.push(`${pattern} ${v}: no auth declaration (wrap it in route({ auth: ... }, ...))`);
+        if (!["public", "user"].includes(auth)) problems.push(`${pattern} ${v}: no auth declaration (wrap it in route({ auth: ... }, ...))`);
       }
     }
     expect(problems).toEqual([]);
@@ -76,27 +66,39 @@ describe("every route that takes an id or a path is covered by a cross-user case
   });
 });
 
-async function guestClient(): Promise<Client> { const c = new Client(); await c.call(bootstrap.GET, "/api/bootstrap"); return c; }
+/** An account made the way a real person makes one: ask for an emailed code, type it in. */
+async function signedUpAccount(): Promise<Client> {
+  _resetTransportForTests();
+  const c = new Client();
+  const address = `attacker-${Math.random().toString(36).slice(2, 8)}@example.com`;
+  expect((await c.json(emailRequest.POST, "/api/auth/email/request", { method: "POST", body: { email: address } })).status).toBe(200);
+  const mail = [...(transport() as MemoryTransport).outbox].reverse().find((m) => m.to === address)!;
+  const code = /\b(\d{6})\b/.exec(mail.text)![1];
+  expect((await c.json(emailVerify.POST, "/api/auth/email/verify", { method: "POST", body: { email: address, code } })).status).toBe(200);
+  return c;
+}
 const send = (c: Client, k: Case, r: Resources) =>
   c.json(modules.get(k.route)![k.verb], k.url(r), { method: k.verb, body: k.body?.(r), params: k.params?.(r) });
 
 describe("user B can never reach user A's resources", () => {
   let victim: Client; let r: Resources; let before: string;
-  beforeAll(async () => { victim = await guestClient(); r = await seedResources(victim); before = await snapshot(actorOf(victim)); });
+  beforeAll(async () => { victim = accountClient(); r = await seedResources(victim); before = await snapshot(actorOf(victim)); });
 
-  const attackers: Array<[string, () => Promise<Client>]> = [
-    ["another guest", guestClient],
-    ["a signed-in account", async () => { const c = new Client(); signIn(c, makeUser().userId); return c; }],
-    ["a brand-new visitor with no cookie (becomes a guest)", async () => new Client()],
+  const attackers: Array<{ who: string; make: () => Promise<Client>; anonymous?: true }> = [
+    { who: "another account", make: async () => accountClient() },
+    { who: "an account that just signed up with an emailed code", make: signedUpAccount },
+    { who: "a visitor with no cookie at all", make: async () => new Client(), anonymous: true },
   ];
 
-  for (const [who, make] of attackers) {
+  for (const { who, make, anonymous } of attackers) {
     describe(`as ${who}`, () => {
       for (const k of CASES) {
-        it(`${k.verb} ${k.route}: ${k.label} → ${k.listing ? "200, nothing of A's" : "404/403"}`, async () => {
+        const expected = anonymous ? "401" : k.listing ? "200, nothing of A's" : "404/403";
+        it(`${k.verb} ${k.route}: ${k.label} → ${expected}`, async () => {
           const attacker = await make();
           const res = await send(attacker, k, r);
-          if (k.listing) expect(res.status).toBe(200);
+          if (anonymous) expect(res.status, `${k.verb} ${k.url(r)} answered ${res.status} ${JSON.stringify(res.data)}`).toBe(401);
+          else if (k.listing) expect(res.status).toBe(200);
           else expect([403, 404], `${k.verb} ${k.url(r)} answered ${res.status} ${JSON.stringify(res.data)}`).toContain(res.status);
           expect(JSON.stringify(res.data ?? "")).not.toMatch(/Victim|victim|confidential roadmap|sk-victim|private (question|answer)/);
         });
@@ -111,7 +113,7 @@ describe("user B can never reach user A's resources", () => {
 describe("positive controls: the same requests work (or reach the handler) for the real owner", () => {
   for (const k of CASES) {
     it(`${k.verb} ${k.route}: ${k.label}`, async () => {
-      const owner = await guestClient();
+      const owner = accountClient();
       const r = await seedResources(owner);
       const res = await send(owner, k, r);
       if (k.owner === "reaches-handler") expect([403, 404], `${k.label}: ${JSON.stringify(res.data)}`).not.toContain(res.status);

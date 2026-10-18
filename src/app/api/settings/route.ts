@@ -5,7 +5,7 @@ import { getSettings, saveSettings } from "@/server/settings";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const GET = route({ auth: "guest" }, async (c) => getSettings(c.actor));
+export const GET = route({ auth: "user" }, async (c) => getSettings(c.actor));
 
 const body = z.object({
   maxSteps: z.number().int().min(2).max(100).optional(),
@@ -16,7 +16,7 @@ const body = z.object({
   temperature: z.number().min(0).max(2).nullable().optional(),
 });
 
-export const PUT = route({ auth: "guest" }, async (c) => {
+export const PUT = route({ auth: "user" }, async (c) => {
   const { temperature, maxSteps, ...rest } = await c.body(body);
   return saveSettings(c.actor, {
     ...rest,

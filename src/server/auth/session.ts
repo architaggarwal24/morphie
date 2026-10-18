@@ -1,6 +1,6 @@
 import { config } from "../config";
 import { db, now } from "../db";
-import { randomId, randomToken, sha256 } from "../crypto";
+import { randomToken, sha256 } from "../crypto";
 import { isSecureRequest } from "../security";
 import type { Actor } from "./actor";
 
@@ -20,7 +20,6 @@ export interface SessionMeta { ip?: string; userAgent?: string }
 export interface StartedSession {
   token: string;
   sessionId: string;
-  isGuest: boolean;
   userId: string;
   absoluteExpiresAt: number;
   idleExpiresAt: number;
@@ -28,46 +27,35 @@ export interface StartedSession {
 
 export interface ResolvedSession {
   actor: Actor;
-  user: { id: string; email: string | null; displayName: string | null; legacyAnonymous: boolean };
+  user: { id: string; email: string | null; displayName: string | null };
   idleExpiresAt: number;
   absoluteExpiresAt: number;
-  linkedGuestUserId: string | null;
 }
 
 export function hashToken(token: string): string {
   return sha256(token);
 }
 
-function lifetimes(isGuest: boolean): { idle: number; max: number } {
-  return isGuest ? { idle: config.guestIdleMs, max: config.guestMaxMs } : { idle: config.userIdleMs, max: config.userMaxMs };
+function lifetimes(): { idle: number; max: number } {
+  return { idle: config.userIdleMs, max: config.userMaxMs };
 }
 
 function clip(v: string | undefined, n: number): string | null {
   return v ? v.slice(0, n) : null;
 }
 
-export function userExists(userId: string): boolean {
-  return !!db().prepare("SELECT 1 AS x FROM users WHERE id = ?").get(userId);
-}
-
-/** A guest is an ordinary users row with is_guest=1, so everything scoped by user_id keeps working. */
-export function createGuestUser(at = now()): string {
-  const id = randomId(18);
-  db().prepare("INSERT INTO users (id, created_at, is_guest, last_seen_at) VALUES (?, ?, 1, ?)").run(id, at, at);
-  return id;
-}
-
-export function startSession(userId: string, isGuest: boolean, meta: SessionMeta = {}, at = now(), linkedGuestUserId?: string): StartedSession {
+/** Start a session for an account that has just proven who it is (see login.ts). Nothing else creates sessions. */
+export function startSession(userId: string, meta: SessionMeta = {}, at = now()): StartedSession {
   const token = randomToken();
   const sessionId = hashToken(token);
-  const { idle, max } = lifetimes(isGuest);
+  const { idle, max } = lifetimes();
   const absoluteExpiresAt = at + max;
   const idleExpiresAt = Math.min(at + idle, absoluteExpiresAt);
   db().prepare(
-    `INSERT INTO sessions (id, user_id, created_at, last_seen_at, idle_expires_at, absolute_expires_at, ip, user_agent, linked_guest_user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(sessionId, userId, at, at, idleExpiresAt, absoluteExpiresAt, clip(meta.ip, 64), clip(meta.userAgent, 200), linkedGuestUserId ?? null);
-  return { token, sessionId, isGuest, userId, absoluteExpiresAt, idleExpiresAt };
+    `INSERT INTO sessions (id, user_id, created_at, last_seen_at, idle_expires_at, absolute_expires_at, ip, user_agent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(sessionId, userId, at, at, idleExpiresAt, absoluteExpiresAt, clip(meta.ip, 64), clip(meta.userAgent, 200));
+  return { token, sessionId, userId, absoluteExpiresAt, idleExpiresAt };
 }
 
 /** Look a token up. Returns null for unknown, revoked, idle-expired or absolutely-expired sessions. */
@@ -76,40 +64,33 @@ export function resolveSession(token: string, at = now()): ResolvedSession | nul
   const d = db();
   const sessionId = hashToken(token);
   const row = d.prepare(
-    `SELECT s.id, s.user_id, s.last_seen_at, s.idle_expires_at, s.absolute_expires_at, s.revoked_at, s.linked_guest_user_id,
-            u.is_guest, u.email, u.display_name, u.legacy_anonymous
+    `SELECT s.id, s.user_id, s.last_seen_at, s.idle_expires_at, s.absolute_expires_at, s.revoked_at, u.email, u.display_name
        FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ?`,
   ).get(sessionId);
   if (!row || row.revoked_at != null || row.idle_expires_at <= at || row.absolute_expires_at <= at) return null;
-  const isGuest = row.is_guest === 1;
   let idleExpiresAt = row.idle_expires_at as number;
   if (at - row.last_seen_at >= TOUCH_INTERVAL_MS) {
-    idleExpiresAt = Math.min(at + lifetimes(isGuest).idle, row.absolute_expires_at);
+    idleExpiresAt = Math.min(at + lifetimes().idle, row.absolute_expires_at);
     d.prepare("UPDATE sessions SET last_seen_at = ?, idle_expires_at = ? WHERE id = ?").run(at, idleExpiresAt, sessionId);
     d.prepare("UPDATE users SET last_seen_at = ? WHERE id = ?").run(at, row.user_id);
   }
   return {
-    actor: { userId: row.user_id, isGuest, sessionId },
-    user: { id: row.user_id, email: row.email ?? null, displayName: row.display_name ?? null, legacyAnonymous: row.legacy_anonymous === 1 },
+    actor: { userId: row.user_id, sessionId },
+    user: { id: row.user_id, email: row.email ?? null, displayName: row.display_name ?? null },
     idleExpiresAt,
     absoluteExpiresAt: row.absolute_expires_at,
-    linkedGuestUserId: row.linked_guest_user_id ?? null,
   };
 }
 
 /**
- * Replace a session with a fresh token (login, privilege change). The old token stops working immediately;
+ * Replace a session with a fresh token (login). The old token, if the caller had one, stops working immediately;
  * the old row is kept (revoked) for audit until purged.
  */
-export function rotateSession(
-  oldSessionId: string | null,
-  next: { userId: string; isGuest: boolean; meta?: SessionMeta; linkedGuestUserId?: string },
-  at = now(),
-): StartedSession {
+export function rotateSession(oldSessionId: string | null, next: { userId: string; meta?: SessionMeta }, at = now()): StartedSession {
   const d = db();
   return d.transaction(() => {
     if (oldSessionId) d.prepare("UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(at, oldSessionId);
-    return startSession(next.userId, next.isGuest, next.meta, at, next.linkedGuestUserId);
+    return startSession(next.userId, next.meta, at);
   })();
 }
 
@@ -149,12 +130,12 @@ export function readSessionToken(req: Request): string | undefined {
   return readCookie(req, isSecureRequest(req) ? COOKIE_SECURE : COOKIE_PLAIN);
 }
 
-export function sessionCookie(token: string, session: Pick<StartedSession, "isGuest" | "absoluteExpiresAt">, req: Request, at = now()): string {
+export function sessionCookie(token: string, session: Pick<StartedSession, "absoluteExpiresAt">, req: Request, at = now()): string {
   const secure = isSecureRequest(req);
   const parts = [`${secure ? COOKIE_SECURE : COOKIE_PLAIN}=${token}`, "Path=/", "HttpOnly", "SameSite=Lax"];
   if (secure) parts.push("Secure");
-  // Guests: a browser-session cookie (no Max-Age). Accounts: persistent, ending when the session absolutely expires.
-  if (!session.isGuest) parts.push(`Max-Age=${Math.max(0, Math.floor((session.absoluteExpiresAt - at) / 1000))}`);
+  // Persistent, ending when the session absolutely expires.
+  parts.push(`Max-Age=${Math.max(0, Math.floor((session.absoluteExpiresAt - at) / 1000))}`);
   return parts.join("; ");
 }
 

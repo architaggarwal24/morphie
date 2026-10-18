@@ -9,6 +9,7 @@ import { cn, useDismiss } from "../ui";
 /** Shows the active model and lets you hop between saved providers without opening Settings. */
 export function ProviderChip({ disabled }: { disabled?: boolean }) {
   const { profiles, activeId, setProfiles, setTab, setSettingsSection, toast } = useStore();
+  const loggedIn = useStore((s) => !!s.session);
   const [open, setOpen] = useState(false);
   const ref = useDismiss(open, () => setOpen(false));
   const active = profiles.find((p) => p.id === activeId);
@@ -21,7 +22,7 @@ export function ProviderChip({ disabled }: { disabled?: boolean }) {
   }
 
   if (!active) {
-    return <button onClick={() => { setTab("settings"); setSettingsSection("providers"); }} className="flex items-center gap-1.5 rounded-lg border border-warn/40 bg-warn/5 px-2.5 py-1 text-xs text-warn"><Plug className="size-3.5" aria-hidden /> Connect a provider</button>;
+    return <button onClick={(e) => { setTab("settings", e.currentTarget); setSettingsSection("providers"); }} aria-haspopup={loggedIn ? undefined : "dialog"} className="flex items-center gap-1.5 rounded-lg border border-warn/40 bg-warn/5 px-2.5 py-1 text-xs text-warn"><Plug className="size-3.5" aria-hidden /> Connect a provider</button>;
   }
   return (
     <div className="relative" ref={ref}>

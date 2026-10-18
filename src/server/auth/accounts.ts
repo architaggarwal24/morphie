@@ -13,7 +13,7 @@ export interface AccountUser { id: string; email: string; displayName: string | 
 const toUser = (r: { id: string; email: string; display_name: string | null }): AccountUser => ({ id: r.id, email: r.email, displayName: r.display_name });
 
 export function findUserByEmail(email: string): AccountUser | null {
-  const r = db().prepare("SELECT id, email, display_name FROM users WHERE email = ? AND is_guest = 0").get(normalizeEmail(email));
+  const r = db().prepare("SELECT id, email, display_name FROM users WHERE email = ?").get(normalizeEmail(email));
   return r ? toUser(r) : null;
 }
 
@@ -29,7 +29,7 @@ export function findOrCreateAccount(verifiedEmail: string, name?: string | null)
   const id = randomId(18);
   const t = now();
   try {
-    db().prepare("INSERT INTO users (id, created_at, email, email_verified_at, display_name, is_guest, last_seen_at) VALUES (?, ?, ?, ?, ?, 0, ?)")
+    db().prepare("INSERT INTO users (id, created_at, email, email_verified_at, display_name, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(id, t, email, t, displayNameFor(email, name), t);
   } catch (e) {
     const again = findUserByEmail(email); // someone else created it a moment ago
@@ -59,7 +59,7 @@ export function loginWithProvider(provider: Provider, profile: VerifiedProfile):
   const d = db();
   return d.transaction(() => {
     const idRow = d.prepare(
-      "SELECT u.id, u.email, u.display_name FROM user_identities i JOIN users u ON u.id = i.user_id WHERE i.provider = ? AND i.provider_user_id = ? AND u.is_guest = 0",
+      "SELECT u.id, u.email, u.display_name FROM user_identities i JOIN users u ON u.id = i.user_id WHERE i.provider = ? AND i.provider_user_id = ?",
     ).get(provider, profile.providerUserId);
     if (idRow) return { user: toUser(idRow), created: false, linked: false };
 

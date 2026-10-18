@@ -1,66 +1,66 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as bootstrap from "@/app/api/bootstrap/route";
 import * as logout from "@/app/api/auth/logout/route";
 import * as logoutAll from "@/app/api/auth/logout-all/route";
 import * as sessionRoute from "@/app/api/auth/session/route";
 import * as providerTest from "@/app/api/providers/test/route";
 import * as conversations from "@/app/api/conversations/route";
 import { config } from "@/server/config";
-import { hashToken, resolveSession, revokeAllSessions, revokeSession, rotateSession, startSession, createGuestUser } from "@/server/auth/session";
-import { createConversation, listConversations } from "@/server/conversations";
-import { sign, sha256 } from "@/server/crypto";
+import { finishLogin } from "@/server/auth/login";
+import { hashToken, resolveSession, revokeAllSessions, revokeSession, rotateSession, sessionCookie, startSession } from "@/server/auth/session";
+import { createConversation } from "@/server/conversations";
+import { sha256 } from "@/server/crypto";
 import { db } from "@/server/db";
 import { _resetRateLimits } from "@/server/security";
 import { Client } from "./helpers/client";
 import { testActor } from "./helpers/actor";
-import { makeUser, signIn } from "./helpers/users";
+import { accountClient, makeUser, signIn } from "./helpers/users";
 
 const HTTPS = "https://morphie.test";
+const ORIGIN_HTTP = "http://localhost:3000";
 const count = (sql: string, ...p: unknown[]) => db().prepare(sql).get(...p).n as number;
+const DAY = 86_400_000;
 
 beforeEach(() => _resetRateLimits());
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 
+/** The Set-Cookie value a completed login would send for this request. */
+const loginCookie = (req: Request, userId = makeUser().userId) => finishLogin(req, "test", null, userId).cookie;
+
 describe("session cookies", () => {
-  it("guest over http: plain name, HttpOnly, SameSite=Lax, no Max-Age, no Secure", async () => {
-    const c = new Client();
-    const res = await c.call(bootstrap.GET, "/api/bootstrap");
-    const cookie = res.headers.get("set-cookie")!;
+  it("over http: plain name, HttpOnly, SameSite=Lax, persistent, no Secure, no Domain", () => {
+    const cookie = loginCookie(new Request(`${ORIGIN_HTTP}/api/auth/email/verify`));
     expect(cookie).toMatch(/^morphie_session=[A-Za-z0-9_-]{43};/);
     expect(cookie).toMatch(/Path=\//); expect(cookie).toMatch(/HttpOnly/); expect(cookie).toMatch(/SameSite=Lax/);
-    expect(cookie).not.toMatch(/Max-Age|Expires|Secure|Domain/i);
+    expect(cookie).toMatch(/Max-Age=\d+/);
+    expect(cookie).not.toMatch(/Secure|Domain|Expires/i);
   });
 
   it("over https: __Host- prefix, Secure, no Domain; and the plain cookie is never accepted", async () => {
-    const c = new Client(HTTPS);
-    const res = await c.call(bootstrap.GET, "/api/bootstrap");
-    const cookie = res.headers.get("set-cookie")!;
+    const cookie = loginCookie(new Request(`${HTTPS}/api/auth/email/verify`));
     expect(cookie).toMatch(/^__Host-morphie_session=[A-Za-z0-9_-]{43};/);
     expect(cookie).toMatch(/Secure/); expect(cookie).toMatch(/Path=\//); expect(cookie).not.toMatch(/Domain/i);
-    // A plain-named cookie (e.g. planted by a sibling subdomain) must be ignored over https.
+    // A plain-named cookie (e.g. planted by a sibling subdomain) must be ignored over https, even if the token is a live session.
+    const { userId } = makeUser(); const live = startSession(userId);
     const planted = new Client(HTTPS);
-    const g = createGuestUser(); const s = startSession(g, true);
-    planted.jar.set("morphie_session", s.token);
-    const r = await planted.call(bootstrap.GET, "/api/bootstrap");
-    expect(r.headers.get("set-cookie")).toMatch(/^__Host-morphie_session=/); // got a brand-new session instead
-    const fresh = planted.jar.get("__Host-morphie_session")!;
-    expect(fresh).not.toBe(s.token);
-    expect(resolveSession(fresh)?.actor.userId).not.toBe(g); // a different identity: the planted session was not adopted
+    planted.jar.set("morphie_session", live.token);
+    const r = await planted.call(conversations.GET, "/api/conversations");
+    expect(r.status).toBe(401);
+    expect(r.headers.get("set-cookie")).toBeNull();
+    // The same token under the __Host- name is accepted.
+    const real = new Client(HTTPS); real.jar.set("__Host-morphie_session", live.token);
+    expect((await real.call(conversations.GET, "/api/conversations")).status).toBe(200);
   });
 
-  it("trusts x-forwarded-proto only behind a trusted proxy", async () => {
-    const spoof = new Client(ORIGIN_HTTP, { "x-forwarded-proto": "https" });
-    expect((await spoof.call(bootstrap.GET, "/api/bootstrap")).headers.get("set-cookie")).toMatch(/^morphie_session=/);
+  it("trusts x-forwarded-proto only behind a trusted proxy", () => {
+    const spoofed = () => new Request(`${ORIGIN_HTTP}/api/auth/email/verify`, { headers: { "x-forwarded-proto": "https", "x-forwarded-for": "198.51.100.1" } });
+    expect(loginCookie(spoofed())).toMatch(/^morphie_session=/);
     vi.stubEnv("MORPHIE_TRUSTED_PROXY", "1");
-    const behind = new Client(ORIGIN_HTTP, { "x-forwarded-proto": "https", "x-forwarded-for": "198.51.100.1" });
-    const res = await behind.call(bootstrap.GET, "/api/bootstrap");
-    expect(res.headers.get("set-cookie")).toMatch(/^__Host-morphie_session=.*Secure/);
+    expect(loginCookie(spoofed())).toMatch(/^__Host-morphie_session=.*Secure/);
   });
 
-  it("an account session gets a persistent cookie whose Max-Age equals its absolute expiry", async () => {
+  it("the cookie's Max-Age equals the session's absolute expiry", () => {
     const { userId } = makeUser();
-    const s = startSession(userId, false);
-    const { sessionCookie } = await import("@/server/auth/session");
+    const s = startSession(userId);
     const cookie = sessionCookie(s.token, s, new Request("http://localhost:3000/"));
     const maxAge = Number(/Max-Age=(\d+)/.exec(cookie)![1]);
     expect(Math.abs(maxAge - config.userMaxMs / 1000)).toBeLessThan(5);
@@ -68,7 +68,7 @@ describe("session cookies", () => {
 
   it("stores only the SHA-256 of the token, never the token", () => {
     const { userId } = makeUser();
-    const s = startSession(userId, false);
+    const s = startSession(userId);
     const rows = db().prepare("SELECT * FROM sessions WHERE user_id = ?").all(userId);
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(sha256(s.token));
@@ -76,93 +76,94 @@ describe("session cookies", () => {
     expect(hashToken(s.token)).toBe(s.sessionId);
   });
 
-  it("ignores forged, truncated and unknown tokens", async () => {
+  it("ignores forged, truncated and unknown tokens: no session, 401 on user routes, nothing created", async () => {
+    const users = count("SELECT COUNT(*) AS n FROM users"), sessions = count("SELECT COUNT(*) AS n FROM sessions");
     for (const bad of ["x", "A".repeat(43), "A".repeat(42), "../../etc/passwd", "A".repeat(300)]) {
       const c = new Client(); c.jar.set("morphie_session", bad);
-      const res = await c.call(bootstrap.GET, "/api/bootstrap");
-      expect(res.status).toBe(200);
-      expect(c.sessionToken).not.toBe(bad);
+      expect((await c.json(sessionRoute.GET, "/api/auth/session")).data.authenticated).toBe(false);
+      const res = await c.call(conversations.GET, "/api/conversations");
+      expect(res.status).toBe(401);
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(c.sessionToken).toBe(bad); // the server issued nothing in its place
     }
+    expect(count("SELECT COUNT(*) AS n FROM users")).toBe(users);
+    expect(count("SELECT COUNT(*) AS n FROM sessions")).toBe(sessions);
   });
 });
-const ORIGIN_HTTP = "http://localhost:3000";
 
 describe("expiry", () => {
-  it("guests: idle TTL (default 120 min) slides with activity but never passes the hard max (24 h)", () => {
-    const g = createGuestUser(0);
-    const s = startSession(g, true, {}, 0);
-    expect(s.idleExpiresAt).toBe(120 * 60_000);
-    expect(s.absoluteExpiresAt).toBe(24 * 3_600_000);
-    expect(resolveSession(s.token, 119 * 60_000)).not.toBeNull();       // active just inside the idle window
-    expect(resolveSession(s.token, 119 * 60_000 + 61_000)).not.toBeNull(); // the touch slid the window forward
-    // keep it busy every 100 minutes until the hard max
-    let t = 119 * 60_000 + 61_000;
-    while (t + 100 * 60_000 < 24 * 3_600_000) { t += 100 * 60_000; expect(resolveSession(s.token, t)).not.toBeNull(); }
-    expect(resolveSession(s.token, 24 * 3_600_000)).toBeNull();          // absolute expiry wins over activity
-  });
-
-  it("guests: expire after the idle TTL with no activity", () => {
-    const s = startSession(createGuestUser(0), true, {}, 0);
-    expect(resolveSession(s.token, 120 * 60_000 + 1)).toBeNull();
-  });
-
-  it("idle and maximum TTLs are configurable", () => {
-    vi.stubEnv("MORPHIE_GUEST_IDLE_MIN", "10"); vi.stubEnv("MORPHIE_GUEST_MAX_HOURS", "1");
-    const s = startSession(createGuestUser(0), true, {}, 0);
-    expect(s.idleExpiresAt).toBe(10 * 60_000);
-    expect(s.absoluteExpiresAt).toBe(3_600_000);
-    expect(resolveSession(s.token, 10 * 60_000 + 1)).toBeNull();
-  });
-
   it("accounts: 14 days idle, 30 days absolute", () => {
     const { userId } = makeUser();
-    const s = startSession(userId, false, {}, 0);
-    expect(s.idleExpiresAt).toBe(14 * 86_400_000);
-    expect(s.absoluteExpiresAt).toBe(30 * 86_400_000);
-    expect(resolveSession(s.token, 13 * 86_400_000)).not.toBeNull();
-    expect(resolveSession(s.token, 40 * 86_400_000)).toBeNull();
+    const s = startSession(userId, {}, 0);
+    expect(s.idleExpiresAt).toBe(14 * DAY);
+    expect(s.absoluteExpiresAt).toBe(30 * DAY);
+    expect(resolveSession(s.token, 13 * DAY)).not.toBeNull();
+    expect(resolveSession(s.token, 40 * DAY)).toBeNull();
   });
 
-  it("an expired session means a brand-new, empty identity at the route level", async () => {
+  it("the idle window slides with activity but never passes the absolute maximum", () => {
+    const s = startSession(makeUser().userId, {}, 0);
+    expect(resolveSession(s.token, 13 * DAY)).not.toBeNull();            // active just inside the idle window
+    expect(resolveSession(s.token, 13 * DAY + 61_000)).not.toBeNull();   // the touch slid the window forward
+    let t = 13 * DAY + 61_000;
+    while (t + 10 * DAY < 30 * DAY) { t += 10 * DAY; expect(resolveSession(s.token, t)).not.toBeNull(); }
+    expect(resolveSession(s.token, 30 * DAY)).toBeNull();                // absolute expiry wins over activity
+  });
+
+  it("expires after the idle period with no activity", () => {
+    const s = startSession(makeUser().userId, {}, 0);
+    expect(resolveSession(s.token, 14 * DAY + 1)).toBeNull();
+  });
+
+  it("idle and maximum lifetimes are configurable", () => {
+    vi.stubEnv("MORPHIE_SESSION_IDLE_DAYS", "1"); vi.stubEnv("MORPHIE_SESSION_MAX_DAYS", "2");
+    const s = startSession(makeUser().userId, {}, 0);
+    expect(s.idleExpiresAt).toBe(DAY);
+    expect(s.absoluteExpiresAt).toBe(2 * DAY);
+    expect(resolveSession(s.token, DAY + 1)).toBeNull();
+  });
+
+  it("an expired session is nobody: 401 on user routes, not a fresh identity, and the data stays out of reach", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     const c = new Client();
-    await c.call(bootstrap.GET, "/api/bootstrap");
-    const first = (await c.json(sessionRoute.GET, "/api/auth/session")).data;
-    expect(first).toMatchObject({ authenticated: true, isGuest: true, user: null });
-    const owner = db().prepare("SELECT user_id FROM sessions WHERE id = ?").get(hashToken(c.sessionToken!)).user_id as string;
-    createConversation(testActor(owner), "chat");
-    vi.setSystemTime(new Date("2026-01-01T02:01:00Z")); // 121 minutes idle
+    const { userId } = makeUser(); signIn(c, userId);
+    createConversation(testActor(userId), "chat", "Mine");
+    expect((await c.json(conversations.GET, "/api/conversations")).data.conversations).toHaveLength(1);
+    const users = count("SELECT COUNT(*) AS n FROM users"), sessions = count("SELECT COUNT(*) AS n FROM sessions");
+    vi.setSystemTime(new Date("2026-01-16T00:00:01Z")); // just over 14 days idle
     expect((await c.json(sessionRoute.GET, "/api/auth/session")).data.authenticated).toBe(false); // public route: sees no session
-    const again = await c.json(conversations.GET, "/api/conversations");
-    expect(again.data.conversations).toEqual([]); // new identity, none of the old data
+    const again = await c.call(conversations.GET, "/api/conversations");
+    expect(again.status).toBe(401);
+    expect(again.headers.get("set-cookie")).toBeNull();
+    expect(count("SELECT COUNT(*) AS n FROM users")).toBe(users);
+    expect(count("SELECT COUNT(*) AS n FROM sessions")).toBe(sessions);
   });
 });
 
 describe("rotation and revocation", () => {
   it("rotation issues a fresh token, kills the old one immediately and keeps the user", () => {
     const { userId } = makeUser();
-    const a = startSession(userId, false);
-    const b = rotateSession(a.sessionId, { userId, isGuest: false });
+    const a = startSession(userId);
+    const b = rotateSession(a.sessionId, { userId });
     expect(b.token).not.toBe(a.token);
     expect(resolveSession(a.token)).toBeNull();
     expect(resolveSession(b.token)?.actor.userId).toBe(userId);
     expect(db().prepare("SELECT revoked_at FROM sessions WHERE id = ?").get(a.sessionId).revoked_at).not.toBeNull();
   });
 
-  it("privilege change: a guest session rotates into a user session for another user, linking the guest", () => {
-    const guest = createGuestUser(); const g = startSession(guest, true);
-    const { userId } = makeUser();
-    const u = rotateSession(g.sessionId, { userId, isGuest: false, linkedGuestUserId: guest });
-    expect(resolveSession(g.token)).toBeNull();
-    const r = resolveSession(u.token)!;
-    expect(r.actor).toMatchObject({ userId, isGuest: false });
-    expect(r.linkedGuestUserId).toBe(guest);
+  it("logging in as someone else in the same browser rotates into the new user's session and kills the old one", () => {
+    const first = makeUser(), second = makeUser();
+    const a = startSession(first.userId);
+    const b = rotateSession(a.sessionId, { userId: second.userId });
+    expect(resolveSession(a.token)).toBeNull();
+    expect(resolveSession(b.token)!.actor.userId).toBe(second.userId);
+    expect(resolveSession(b.token)!.actor).not.toHaveProperty("isGuest");
   });
 
   it("revokeSession and revokeAllSessions take effect on the next request", () => {
     const { userId } = makeUser();
-    const [a, b, c] = [startSession(userId, false), startSession(userId, false), startSession(userId, false)];
+    const [a, b, c] = [startSession(userId), startSession(userId), startSession(userId)];
     expect(revokeSession(a.sessionId)).toBe(true);
     expect(revokeSession(a.sessionId)).toBe(false); // already revoked
     expect(resolveSession(a.token)).toBeNull();
@@ -170,31 +171,31 @@ describe("rotation and revocation", () => {
     expect(resolveSession(b.token)).toBeNull(); expect(resolveSession(c.token)).toBeNull();
   });
 
-  it("a revoked cookie does not resurrect: the route starts a different guest", async () => {
-    const guest = createGuestUser(); const s = startSession(guest, true);
-    const c = new Client(); c.jar.set("morphie_session", s.token);
+  it("a revoked cookie does not resurrect: 401, and no replacement session is started", async () => {
+    const c = new Client(); const s = signIn(c, makeUser().userId);
     revokeSession(s.sessionId);
-    await c.call(bootstrap.GET, "/api/bootstrap");
-    expect(c.sessionToken).not.toBe(s.token);
-    expect(resolveSession(c.sessionToken!)?.actor.userId).not.toBe(guest);
+    const sessions = count("SELECT COUNT(*) AS n FROM sessions");
+    const res = await c.call(conversations.GET, "/api/conversations");
+    expect(res.status).toBe(401);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(count("SELECT COUNT(*) AS n FROM sessions")).toBe(sessions);
   });
 });
 
 describe("logout and logout-all", () => {
   it("logout revokes the session, clears the cookie, and is idempotent", async () => {
-    const c = new Client();
-    await c.call(bootstrap.GET, "/api/bootstrap");
+    const c = accountClient();
     const token = c.sessionToken!;
     const res = await c.call(logout.POST, "/api/auth/logout", { method: "POST" });
     expect(res.headers.get("set-cookie")).toMatch(/^morphie_session=;.*Max-Age=0/);
     expect(resolveSession(token)).toBeNull();
     expect(c.sessionToken).toBeUndefined();
     expect((await c.json(logout.POST, "/api/auth/logout", { method: "POST" })).status).toBe(200); // nothing to revoke: still fine
-    expect(count("SELECT COUNT(*) AS n FROM users")).toBeGreaterThan(0);
+    expect(count("SELECT COUNT(*) AS n FROM users")).toBeGreaterThan(0); // signing out never deletes the account
   });
 
   it("logout needs a same-origin request (CSRF)", async () => {
-    const c = new Client(); await c.call(bootstrap.GET, "/api/bootstrap");
+    const c = accountClient();
     expect((await c.json(logout.POST, "/api/auth/logout", { method: "POST", origin: "https://evil.example" })).status).toBe(403);
     expect(resolveSession(c.sessionToken!)).not.toBeNull();
   });
@@ -209,7 +210,7 @@ describe("logout and logout-all", () => {
     expect(res.status).toBe(200); expect(res.data.revoked).toBe(3);
     for (const s of [sa, sb, sc]) expect(resolveSession(s.token)).toBeNull();
     expect((await b.json(sessionRoute.GET, "/api/auth/session")).data.authenticated).toBe(false);
-    expect((await bystander.json(sessionRoute.GET, "/api/auth/session")).data).toMatchObject({ authenticated: true, isGuest: false });
+    expect((await bystander.json(sessionRoute.GET, "/api/auth/session")).data).toMatchObject({ authenticated: true });
   });
 });
 
@@ -218,74 +219,59 @@ describe("auth levels", () => {
     const before = count("SELECT COUNT(*) AS n FROM users"); const sess = count("SELECT COUNT(*) AS n FROM sessions");
     const c = new Client();
     const res = await c.call(sessionRoute.GET, "/api/auth/session");
-    expect(await res.json()).toMatchObject({ authenticated: false, isGuest: null, user: null });
+    const body = await res.json();
+    expect(body).toMatchObject({ authenticated: false, user: null });
+    expect(body).not.toHaveProperty("isGuest");
     expect(res.headers.get("set-cookie")).toBeNull();
     expect(count("SELECT COUNT(*) AS n FROM users")).toBe(before);
     expect(count("SELECT COUNT(*) AS n FROM sessions")).toBe(sess);
   });
 
-  it("user routes: 401 with no session (creating nothing), 403 for a guest, OK for an account", async () => {
-    const before = count("SELECT COUNT(*) AS n FROM users");
+  it("user routes: 401 with no session (creating nothing), OK for an account", async () => {
+    const users = count("SELECT COUNT(*) AS n FROM users"), sessions = count("SELECT COUNT(*) AS n FROM sessions");
     const anon = new Client();
-    const r1 = await anon.call(logoutAll.POST, "/api/auth/logout-all", { method: "POST" });
-    expect(r1.status).toBe(401); expect(r1.headers.get("set-cookie")).toBeNull();
-    expect(count("SELECT COUNT(*) AS n FROM users")).toBe(before);
-    const guest = new Client(); await guest.call(bootstrap.GET, "/api/bootstrap");
-    const r2 = await guest.json(logoutAll.POST, "/api/auth/logout-all", { method: "POST" });
-    expect(r2.status).toBe(403); expect(r2.data.code).toBe("account_required");
-    const user = new Client(); signIn(user, makeUser().userId);
-    expect((await user.json(logoutAll.POST, "/api/auth/logout-all", { method: "POST" })).status).toBe(200);
+    const r1 = await anon.json(logoutAll.POST, "/api/auth/logout-all", { method: "POST" });
+    expect(r1.status).toBe(401); expect(r1.data.code).toBe("unauthenticated"); expect(r1.headers.get("set-cookie")).toBeNull();
+    expect(count("SELECT COUNT(*) AS n FROM users")).toBe(users);
+    expect(count("SELECT COUNT(*) AS n FROM sessions")).toBe(sessions);
+    expect((await accountClient().json(logoutAll.POST, "/api/auth/logout-all", { method: "POST" })).status).toBe(200);
   });
 
-  it("GET /api/auth/session tells a guest when the session ends, and an account who they are", async () => {
-    const g = new Client(); await g.call(bootstrap.GET, "/api/bootstrap");
-    const gs = (await g.json(sessionRoute.GET, "/api/auth/session")).data;
-    expect(gs).toMatchObject({ authenticated: true, isGuest: true, user: null });
-    expect(gs.expiresAt).toBeGreaterThan(Date.now()); expect(gs.idleExpiresAt).toBeLessThanOrEqual(gs.expiresAt);
+  it("GET /api/auth/session tells an account who they are and when the session ends", async () => {
     const u = new Client(); const { userId, email } = makeUser("Ada@Example.com"); signIn(u, userId);
-    expect((await u.json(sessionRoute.GET, "/api/auth/session")).data).toMatchObject({ authenticated: true, isGuest: false, user: { email, displayName: "Test User" } });
+    const data = (await u.json(sessionRoute.GET, "/api/auth/session")).data;
+    expect(data).toMatchObject({ authenticated: true, user: { email, displayName: "Test User" } });
+    expect(data).not.toHaveProperty("isGuest");
+    expect(data.expiresAt).toBeGreaterThan(Date.now()); expect(data.idleExpiresAt).toBeLessThanOrEqual(data.expiresAt);
   });
 });
 
-describe("identity flooding", () => {
+describe("request flooding", () => {
   const withProxy = (ip: string) => ({ "x-forwarded-for": ip });
 
-  it("caps new identities per IP per hour: 429, no users row, no cookie", async () => {
-    vi.stubEnv("MORPHIE_TRUSTED_PROXY", "1"); vi.stubEnv("MORPHIE_MAX_NEW_IDENTITIES_PER_HOUR", "3");
-    const before = count("SELECT COUNT(*) AS n FROM users");
-    for (let i = 0; i < 3; i++) expect((await new Client(ORIGIN_HTTP, withProxy("203.0.113.7")).call(bootstrap.GET, "/api/bootstrap")).status).toBe(200);
-    const blocked = await new Client(ORIGIN_HTTP, withProxy("203.0.113.7")).call(bootstrap.GET, "/api/bootstrap");
-    expect(blocked.status).toBe(429);
-    expect(blocked.headers.get("set-cookie")).toBeNull();
-    expect(count("SELECT COUNT(*) AS n FROM users")).toBe(before + 3);
-    // another network is unaffected, and a returning visitor (has a cookie) is not an "identity" at all
-    expect((await new Client(ORIGIN_HTTP, withProxy("203.0.113.8")).call(bootstrap.GET, "/api/bootstrap")).status).toBe(200);
-  });
-
-  it("a forged x-forwarded-for cannot dodge the cap, and a returning session is never counted", async () => {
-    vi.stubEnv("MORPHIE_TRUSTED_PROXY", "1"); vi.stubEnv("MORPHIE_MAX_NEW_IDENTITIES_PER_HOUR", "2");
+  it("a forged x-forwarded-for cannot dodge the per-IP ceiling", async () => {
+    vi.stubEnv("MORPHIE_TRUSTED_PROXY", "1"); vi.stubEnv("MORPHIE_IP_RATE_PER_MIN", "2");
     const real = "198.51.100.20";
-    const returning = new Client(ORIGIN_HTTP, withProxy(real));
-    await returning.call(bootstrap.GET, "/api/bootstrap");
-    await new Client(ORIGIN_HTTP, withProxy(real)).call(bootstrap.GET, "/api/bootstrap");
+    for (let i = 0; i < 2; i++) expect((await new Client(ORIGIN_HTTP, withProxy(real)).call(sessionRoute.GET, "/api/auth/session")).status).toBe(200);
     // the attacker prepends fake hops; the proxy still appends the real one last
-    const forged = new Client(ORIGIN_HTTP, withProxy(`1.1.1.${1}, ${real}`));
-    expect((await forged.call(bootstrap.GET, "/api/bootstrap")).status).toBe(429);
-    for (let i = 0; i < 5; i++) expect((await returning.call(bootstrap.GET, "/api/bootstrap")).status).toBe(200);
+    expect((await new Client(ORIGIN_HTTP, withProxy(`1.1.1.1, ${real}`)).call(sessionRoute.GET, "/api/auth/session")).status).toBe(429);
+    // another network is unaffected
+    expect((await new Client(ORIGIN_HTTP, withProxy("198.51.100.21")).call(sessionRoute.GET, "/api/auth/session")).status).toBe(200);
   });
 
   it("without a trusted proxy every client shares the 'unknown' bucket (and spoofed headers are ignored)", async () => {
-    vi.stubEnv("MORPHIE_MAX_NEW_IDENTITIES_PER_HOUR", "2");
-    expect((await new Client(ORIGIN_HTTP, withProxy("1.1.1.1")).call(bootstrap.GET, "/api/bootstrap")).status).toBe(200);
-    expect((await new Client(ORIGIN_HTTP, withProxy("2.2.2.2")).call(bootstrap.GET, "/api/bootstrap")).status).toBe(200);
-    expect((await new Client(ORIGIN_HTTP, withProxy("3.3.3.3")).call(bootstrap.GET, "/api/bootstrap")).status).toBe(429);
+    vi.stubEnv("MORPHIE_IP_RATE_PER_MIN", "2");
+    expect((await new Client(ORIGIN_HTTP, withProxy("1.1.1.1")).call(sessionRoute.GET, "/api/auth/session")).status).toBe(200);
+    expect((await new Client(ORIGIN_HTTP, withProxy("2.2.2.2")).call(sessionRoute.GET, "/api/auth/session")).status).toBe(200);
+    expect((await new Client(ORIGIN_HTTP, withProxy("3.3.3.3")).call(sessionRoute.GET, "/api/auth/session")).status).toBe(429);
   });
 
-  it("per-IP rate limits cannot be escaped by rotating cookies", async () => {
+  it("per-IP rate limits cannot be escaped by switching accounts or cookies", async () => {
     vi.stubEnv("MORPHIE_TRUSTED_PROXY", "1");
     let limited = 0;
     for (let i = 0; i < 45; i++) {
-      const fresh = new Client(ORIGIN_HTTP, withProxy("192.0.2.99")); // new cookie every time: per-user bucket never fills
+      const fresh = new Client(ORIGIN_HTTP, withProxy("192.0.2.99")); // a different account every time: the per-user bucket never fills
+      signIn(fresh, makeUser().userId);
       const r = await fresh.json(providerTest.POST, "/api/providers/test", { method: "POST", body: {} });
       if (r.status === 429) limited++;
     }
@@ -298,61 +284,5 @@ describe("identity flooding", () => {
     const statuses: number[] = [];
     for (let i = 0; i < 7; i++) statuses.push((await c.call(sessionRoute.GET, "/api/auth/session")).status);
     expect(statuses).toEqual([200, 200, 200, 200, 200, 429, 429]);
-  });
-});
-
-describe("legacy morphie_uid cookie shim", () => {
-  const legacyCookie = (id: string) => `${id}.${sign(id)}`;
-  const seedLegacy = () => {
-    const id = "legacyuser_" + Math.random().toString(36).slice(2, 12).padEnd(10, "x");
-    db().prepare("INSERT INTO users (id, created_at) VALUES (?, ?)").run(id, Date.now()); // as the old code did: no sessions, no flags
-    return id;
-  };
-
-  it("turns a valid old cookie into a guest session for the SAME user, and clears the old cookie", async () => {
-    const id = seedLegacy();
-    createConversation(testActor(id), "chat", "Kept across the upgrade");
-    const c = new Client(); c.jar.set("morphie_uid", legacyCookie(id));
-    const res = await c.call(conversations.GET, "/api/conversations");
-    expect((await res.json()).conversations.map((x: any) => x.title)).toEqual(["Kept across the upgrade"]);
-    const cookies = res.headers.getSetCookie();
-    expect(cookies.some((x) => x.startsWith("morphie_session="))).toBe(true);
-    expect(cookies.some((x) => /^morphie_uid=;.*Max-Age=0/.test(x))).toBe(true);
-    expect(c.jar.has("morphie_uid")).toBe(false);
-    // the next request needs only the new cookie
-    expect((await c.json(conversations.GET, "/api/conversations")).data.conversations).toHaveLength(1);
-    expect(resolveSession(c.sessionToken!)?.actor).toMatchObject({ userId: id, isGuest: true });
-  });
-
-  it("rejects forged signatures, unknown users, and is switchable off", async () => {
-    const id = seedLegacy();
-    const forged = new Client(); forged.jar.set("morphie_uid", `${id}.${"A".repeat(32)}`);
-    await forged.call(bootstrap.GET, "/api/bootstrap");
-    expect(resolveSession(forged.sessionToken!)?.actor.userId).not.toBe(id);
-    const ghost = new Client(); ghost.jar.set("morphie_uid", legacyCookie("neverexisted_user_0000001"));
-    await ghost.call(bootstrap.GET, "/api/bootstrap");
-    expect(resolveSession(ghost.sessionToken!)?.actor.userId).not.toBe("neverexisted_user_0000001");
-    vi.stubEnv("MORPHIE_ACCEPT_LEGACY_COOKIE", "false");
-    const off = new Client(); off.jar.set("morphie_uid", legacyCookie(id));
-    await off.call(bootstrap.GET, "/api/bootstrap");
-    expect(resolveSession(off.sessionToken!)?.actor.userId).not.toBe(id);
-  });
-
-  it("public routes and user-level routes never run the shim (they must not create sessions)", async () => {
-    const id = seedLegacy();
-    const c = new Client(); c.jar.set("morphie_uid", legacyCookie(id));
-    const res = await c.call(sessionRoute.GET, "/api/auth/session");
-    expect(res.headers.get("set-cookie")).toBeNull();
-    expect((await c.call(logoutAll.POST, "/api/auth/logout-all", { method: "POST" })).status).toBe(401);
-  });
-
-  it("is isolated to one file and one call site so it can be deleted", async () => {
-    const fs = await import("node:fs"); const path = await import("node:path");
-    const hits: string[] = [];
-    const walk = (d: string) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else if (/\.(ts|tsx)$/.test(e.name) && fs.readFileSync(f, "utf8").includes("REMOVE-LEGACY-SHIM")) hits.push(f); } };
-    walk("src");
-    expect(hits.map((h) => h.replace(/\\/g, "/")).sort()).toEqual(["src/server/auth/legacyCookie.ts", "src/server/http.ts"]);
-    const calls = fs.readFileSync("src/server/http.ts", "utf8").split("\n").filter((l) => l.includes("REMOVE-LEGACY-SHIM"));
-    expect(calls).toHaveLength(1);
   });
 });

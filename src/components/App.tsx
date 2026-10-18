@@ -1,9 +1,10 @@
 "use client";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { useEffect } from "react";
-import { useStore } from "@/lib/store";
+import { PUBLIC_TAB, useStore } from "@/lib/store";
 import { ChatView } from "./chat/ChatView";
 import { CommandPalette } from "./CommandPalette";
+import { AUTH_ERRORS, LoginDialog } from "./LoginDialog";
 import { DesignView } from "./design/DesignView";
 import { DocumentsView } from "./library/DocumentsView";
 import { MemoryView } from "./library/MemoryView";
@@ -15,9 +16,14 @@ import { Button, Logo, Spinner } from "./ui";
 
 export default function App() {
   const ready = useStore((s) => s.ready);
+  const session = useStore((s) => s.session);
   const loadError = useStore((s) => s.loadError);
   const boot = useStore((s) => s.boot);
-  const tab = useStore((s) => s.tab);
+  const storedTab = useStore((s) => s.tab);
+  const loginOpen = useStore((s) => s.loginOpen);
+  const toast = useStore((s) => s.toast);
+  // Until someone has logged in, Chat is the only tab there is, whatever the stored value says.
+  const tab = session ? storedTab : PUBLIC_TAB;
   const activeConv = useStore((s) => s.activeConv);
   const loaded = useStore((s) => s.messages);
   const loadMessages = useStore((s) => s.loadMessages);
@@ -25,9 +31,17 @@ export default function App() {
 
   useEffect(() => { void boot(); }, [boot]);
 
+  // Back from a failed Google/GitHub login: say why, and clear it from the address bar.
+  useEffect(() => {
+    const err = new URLSearchParams(location.search).get("auth_error");
+    if (!err) return;
+    toast("error", AUTH_ERRORS[err] ?? AUTH_ERRORS.provider_error);
+    history.replaceState(null, "", location.pathname);
+  }, [toast]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); setPalette(!useStore.getState().paletteOpen); }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); if (!useStore.getState().loginOpen) setPalette(!useStore.getState().paletteOpen); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -55,21 +69,25 @@ export default function App() {
   }
 
   return (
-    <div className="surface-grain flex h-dvh overflow-hidden">
-      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[70] focus:rounded-lg focus:bg-panel focus:px-3 focus:py-2 focus:shadow-pop">Skip to content</a>
-      <Rail />
-      {(tab === "chat" || tab === "agent") && <ConversationSidebar mode={tab} />}
-      {tab === "design" && <DesignSidebar />}
-      <main id="main" className="flex min-w-0 flex-1 flex-col pb-16 md:pb-0">
-        {tab === "chat" && <ChatView key="chat" mode="chat" />}
-        {tab === "agent" && <ChatView key="agent" mode="agent" />}
-        {tab === "design" && <DesignView />}
-        {tab === "documents" && <DocumentsView />}
-        {tab === "memory" && <MemoryView />}
-        {tab === "settings" && <SettingsView />}
-      </main>
-      <CommandPalette />
+    <>
+      {/* While the login popup is open the page behind it is inert: not clickable, not focusable, hidden from assistive tech. */}
+      <div inert={loginOpen} className="surface-grain flex h-dvh overflow-hidden">
+        <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[70] focus:rounded-lg focus:bg-panel focus:px-3 focus:py-2 focus:shadow-pop">Skip to content</a>
+        <Rail />
+        {(tab === "chat" || tab === "agent") && <ConversationSidebar mode={tab} />}
+        {tab === "design" && <DesignSidebar />}
+        <main id="main" className="flex min-w-0 flex-1 flex-col pb-16 md:pb-0">
+          {tab === "chat" && <ChatView key="chat" mode="chat" />}
+          {tab === "agent" && <ChatView key="agent" mode="agent" />}
+          {tab === "design" && <DesignView />}
+          {tab === "documents" && <DocumentsView />}
+          {tab === "memory" && <MemoryView />}
+          {tab === "settings" && <SettingsView />}
+        </main>
+        <CommandPalette />
+      </div>
+      <LoginDialog />
       <Toasts />
-    </div>
+    </>
   );
 }

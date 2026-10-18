@@ -3,7 +3,7 @@ import { deleteDocument, listDocuments } from "@/server/rag";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const DELETE = route({ auth: "guest" }, async (c) => {
+export const DELETE = route({ auth: "user" }, async (c) => {
   deleteDocument(c.actor, c.params.id);
   return { documents: listDocuments(c.actor) };
 });

@@ -1,5 +1,15 @@
 // Types shared by the browser and the server. Keep this file free of server-only imports.
 
+/** Which sign-in methods this server offers (the same flow signs people in and signs new ones up). */
+export interface LoginMethods { email: boolean; google: boolean; github: boolean }
+
+/** The signed-in session as /api/bootstrap reports it. Anonymous visitors get `session: null` instead. */
+export interface SessionView {
+  user: { email: string | null; displayName: string | null };
+  expiresAt: number;
+  idleExpiresAt: number;
+}
+
 export type ProviderKind =
   | "openai" | "anthropic" | "gemini" | "mistral" | "ollama" | "openrouter" | "groq"
   | "deepseek" | "xai" | "together" | "fireworks" | "cerebras" | "perplexity"

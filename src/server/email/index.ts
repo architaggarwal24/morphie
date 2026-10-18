@@ -53,6 +53,42 @@ export class MemoryTransport implements EmailTransport {
 export type TransportName = "smtp" | "resend" | "console" | "memory";
 
 /**
+ * nodemailer waits up to two minutes for an unreachable or silent mail server, so a wrong host looks like "the code never
+ * arrives" for that long. Fail in seconds instead. Anything already set in the URL is left alone.
+ */
+export function smtpUrlWithTimeouts(url: string): string {
+  try {
+    const u = new URL(url);
+    for (const [k, v] of Object.entries({ connectionTimeout: "10000", greetingTimeout: "10000", socketTimeout: "20000" })) if (!u.searchParams.has(k)) u.searchParams.set(k, v);
+    return u.toString();
+  } catch { return url; }
+}
+
+/**
+ * Whether the last real send worked. This is about the SERVER (wrong password, unverified sender, host down), never about an
+ * address, so showing it to a visitor reveals nothing about who has an account. Sends stay fire-and-forget (see otp.ts).
+ */
+// On globalThis like the other process-wide state (db, approvals): Next bundles each route separately, so a plain module variable
+// written by the route that sends the code would be invisible to the route that reports on it.
+const g = globalThis as unknown as { __morphieMailStatus?: { at: number; ok: boolean } };
+const FAILURE_MEMORY_MS = 15 * 60_000;
+export function noteSend(ok: boolean, at = Date.now()): void { g.__morphieMailStatus = { at, ok }; }
+/** "console": nothing is emailed, the code is printed on the server (development only). "failing": the last send failed recently. */
+export function deliveryStatus(at = Date.now()): "console" | "failing" | undefined {
+  if (transportName() === "console") return "console";
+  const last = g.__morphieMailStatus;
+  return last && !last.ok && at - last.at < FAILURE_MEMORY_MS ? "failing" : undefined;
+}
+export function _resetDeliveryForTests(): void { g.__morphieMailStatus = undefined; }
+
+/** What to check when a send fails, per transport (written to the server log, never shown to visitors). */
+export function sendFailureHint(name: string): string {
+  if (name === "smtp") return "Check MORPHIE_SMTP_URL, and that MORPHIE_EMAIL_FROM is an address your mail provider lets you send from.";
+  if (name === "resend") return "Check RESEND_API_KEY, and that MORPHIE_EMAIL_FROM uses a domain verified in Resend.";
+  return "";
+}
+
+/**
  * Which transport is configured, or undefined when email login is unavailable.
  * console and memory exist ONLY outside production: this is checked here, again in createTransport(), and at startup
  * in assertProductionConfig(), so there is no path that mails to a console in production.
@@ -78,7 +114,7 @@ export function createTransport(env: NodeJS.ProcessEnv = process.env): EmailTran
   if (env.NODE_ENV === "production" && (name === "console" || name === "memory")) throw new Error("The console email transport is not allowed in production.");
   const from = config.emailFrom;
   switch (name) {
-    case "smtp": return new SmtpTransport(nodemailer.createTransport(env.MORPHIE_SMTP_URL!.trim()), from);
+    case "smtp": return new SmtpTransport(nodemailer.createTransport(smtpUrlWithTimeouts(env.MORPHIE_SMTP_URL!.trim())), from);
     case "resend": return new ResendTransport(env.RESEND_API_KEY!.trim(), from);
     case "console": return new ConsoleTransport();
     case "memory": return new MemoryTransport();

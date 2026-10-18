@@ -13,7 +13,7 @@ npm install
 npm run dev          # http://localhost:3000
 ```
 
-Requires Node ≥ 22.13 (Morphie uses the built-in `node:sqlite`). On first launch you land on **Settings → Providers**: add a provider, pick a model, and you're chatting. No `.env` needed.
+Requires Node ≥ 22.13 (Morphie uses the built-in `node:sqlite`). Everything except viewing the page and the **Chat** tab needs an account. A visitor can look around and type in the Chat box; clicking any other tab, Send, or **Login / Sign up** opens a **Log in or sign up** popup (email, then a 6-digit code; in development the code is printed to the server console, and the same step creates your account). Whatever you were about to do resumes afterwards: the tab you clicked, provider setup, and your typed draft (restored, never auto-sent). A brand-new account with nothing pending lands on **Settings → Providers**: add a provider, pick a model, and you're chatting. No `.env` needed locally.
 
 Production: `npm run build && npm start`.
 
@@ -95,7 +95,7 @@ Data lives in `./data` (`morphie.db`, `.encryption_key`, `.session_secret`, `wor
 ## Security model
 
 - **Keys:** AES-256-GCM at rest; never returned by any endpoint or included in exports. Error text is scrubbed of key material.
-- **Sessions:** anonymous, HMAC-signed, `HttpOnly`, `SameSite=Lax` cookie. Every row is scoped to it. There are no user accounts.
+- **Accounts only:** there is no guest mode. A visitor who hasn't signed in has no identity, no cookie and no database rows; they can load the page, use the Chat box as a plain text field, and start the login flow, and every other route answers `401`. In the UI that means the Chat tab only: the other tabs are listed as *log in required* and open the login popup instead of switching, Settings is replaced by **Login / Sign up** until there is an account, and the command palette's navigation and action commands open the popup too (theme commands still work). Every row is scoped to the signed-in account.
 - **CSRF:** cross-origin writes are rejected (Origin / Sec-Fetch-Site check).
 - **CSP:** per-request nonce with `strict-dynamic`; `frame-ancestors 'none'`; remote images are blocked and rendered as links.
 - **SSRF:** every outbound call (providers, `fetch_url`, web search, email API) goes through `guardedFetch`, which resolves the name, rejects private/loopback/link-local/IPv4-mapped/NAT64/6to4 addresses, and connects to exactly the addresses it validated, so DNS rebinding and redirects can't slip through. Provider URLs may be local only where `MORPHIE_ALLOW_PRIVATE_URLS` allows it (default: true in development, **false in production**); `fetch_url` never allows it.
@@ -107,11 +107,11 @@ Data lives in `./data` (`morphie.db`, `.encryption_key`, `.session_secret`, `wor
 ## Accounts and sessions
 
 - **Sessions** are opaque: the cookie holds 32 random bytes and the database stores only their SHA-256, so a leaked database can't be replayed as cookies. Over https the cookie is `__Host-morphie_session` (Secure, no Domain); over plain http (localhost) it is `morphie_session`. Always `HttpOnly; SameSite=Lax`.
-- **Guests** (no sign-in) get a browser-session cookie plus a server-side idle timeout (default 120 min) and hard maximum (24 h). Signed-in sessions last up to 30 days (14 idle). Tokens are rotated on login; sign out revokes immediately; "Sign out everywhere" revokes every session of the account.
-- **Every route declares who may call it** (`route({ auth: "public" | "guest" | "user" }, ...)`; leaving it out is a type error) and all SQL lives in `src/server/data/`, where every function takes an `Actor` and scopes by owner. `tests/ownership.test.ts` discovers every route file and fails on a missing declaration or a route that takes an id without a cross-user test.
-- **Login methods:** an email code (6 digits, 10 minutes, single use, 5 tries, 60 s resend cooldown, stored only as a keyed hash; answers are identical for known and unknown addresses), Google, and GitHub. Accounts link **only by verified email**: an unverified provider email never creates or links anything.
-- **A magic link is deliberately not offered**: it would only sign in whichever browser opens it, which breaks the "type the code in the same tab" flow that keeps a guest's session alive.
-- **Not yet in this version:** signing in does not move a guest's work into the account (the guest id is remembered on the new session for that step), and guest data is not yet swept after expiry.
+- **Sign-in is also sign-up.** The email code, Google and GitHub flows create the account the first time a verified address completes them. Nothing is created before that: asking for a code, starting an OAuth redirect or loading `/api/bootstrap` leaves no user, session or cookie behind. Signed-in sessions last up to 30 days (14 idle, both configurable). Tokens are rotated on login; sign out revokes immediately; "Sign out everywhere" revokes every session of the account. If a session ends while the page is open, the next request answers `401` and the page drops back to the logged-out view (Chat only), clearing everything of the account from memory.
+- **Every route declares who may call it** (`route({ auth: "public" | "user" }, ...)`; leaving it out, or writing any other level, is a type error). The only `public` routes are the page's own needs: `/api/bootstrap` (anonymous callers get just the version, the login methods and `session: null`; signed-in users get the full payload), `/api/auth/session`, `/api/health` and the login/logout flow. All SQL lives in `src/server/data/`, where every function takes an `Actor` and scopes by owner. `tests/anonymous.test.ts` discovers every route file, pins the exact list of public routes, and calls every other route with no cookie (expecting `401` and no new `users` or `sessions` rows); `tests/ownership.test.ts` fails on a route that takes an id without a cross-user test.
+- **Login methods:** an email code (6 digits, 10 minutes, single use, 5 tries, 60 s resend cooldown, stored only as a keyed hash; answers are identical for known and unknown addresses), Google, and GitHub. Accounts link **only by verified email**: an unverified provider email never creates or links anything. At least one method must be configured in production, or nobody can sign in.
+- **A magic link is deliberately not offered**: it would only sign in whichever browser opens it, which breaks the "type the code in the same tab" flow.
+- **The login popup** is the shared `Dialog` (labelled, focus-trapped, closes with Esc, an outside click or the X, and returns focus to whatever opened it) over a dimmed, blurred page that is `inert` while it is open. For Google/GitHub the page leaves and comes back, so only `{ tab, draft }` is kept in `sessionStorage` across the round trip and it is removed as soon as it is read.
 
 ### Setting up sign-in
 
@@ -122,17 +122,24 @@ Set `MORPHIE_PUBLIC_URL` first (e.g. `https://morphie.example.com`; `http://loca
 - `resend`: set `RESEND_API_KEY` (and verify your sending domain in Resend) and `MORPHIE_EMAIL_FROM`.
 - Development only: with nothing set, codes are printed to the server console. The console transport is refused in production at startup and again when the transport is created.
 
+**Not getting a code?** The popup says why where it can:
+- *"Development mode: no email is sent."* You are on the console transport. Nothing is emailed; the code is printed in the terminal running `npm run dev`, on lines starting with `[email:dev]`.
+- *"We couldn't send the email just now."* The mail server rejected the send. The server log has the reason on a line starting `[auth] couldn't send the sign-in email`, with what to check (usually `MORPHIE_SMTP_URL`, or a `MORPHIE_EMAIL_FROM` your provider won't send from; for Resend, `RESEND_API_KEY` and a verified domain). SMTP connections give up after 10 seconds instead of nodemailer's two minutes, so this shows up quickly.
+- Nothing at all, and no warning: check spam, then the resend limits (one code per address per minute, five per hour).
+
 **Google.** In Google Cloud Console → APIs & Services → Credentials → *Create credentials → OAuth client ID* → *Web application*. Add the authorised redirect URI `<MORPHIE_PUBLIC_URL>/api/auth/oauth/google/callback`. Configure the consent screen (scopes `openid`, `email`, `profile` are all that's requested). Put the client id and secret in `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`. Only accounts whose email Google reports as verified can sign in.
 
 **GitHub.** Settings → Developer settings → OAuth Apps → *New OAuth App*. Authorization callback URL: `<MORPHIE_PUBLIC_URL>/api/auth/oauth/github/callback`. Put the client id and a generated client secret in `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`. The scope requested is `user:email`; Morphie uses the **verified primary** address from `/user/emails` (never the public profile email).
 
 PKCE (S256) and a browser-bound `state` are used for both. There is no OAuth library: the flow is a small, tested module (`src/server/auth/oauth.ts`) because the commonly used one (Arctic) is marked deprecated on npm.
 
-### Upgrading from the old anonymous cookie
+### Upgrading from a build that had guests
 
-Before sessions existed the browser held `morphie_uid=<id>.<signature>`. For one release Morphie accepts a still-valid one and turns it into a normal guest session for the *same* user (their data is kept), clearing the old cookie. Those users are flagged `legacy_anonymous` so a future guest sweeper will not delete their data. `SESSION_SECRET` is needed only for this check.
+Earlier builds could create anonymous "guest" users (and, before sessions existed, an anonymous `morphie_uid` cookie). Both are gone. Migration `003_remove_guests` runs once at startup: it prints a **dry-run count** (guest users, how many were old pre-session identities, their sessions, and rows per table) and only then deletes those users with their sessions, data and workspace folders, and drops the columns that only existed for them. A row counts as a guest only if it is flagged as one **and** has no email, so an account can never be caught by it. An empty database prints nothing.
 
-**Removing the shim** (the release after next): (1) in the next release set `MORPHIE_ACCEPT_LEGACY_COOKIE=false` by default and watch the `[auth] legacy cookie migrated` log line fall to zero; (2) then delete `src/server/auth/legacyCookie.ts` and the block marked `REMOVE-LEGACY-SHIM` in `src/server/http.ts`, the `acceptLegacyCookie` setting, and the legacy tests in `tests/auth.test.ts`; (3) drop `SESSION_SECRET` from the required production settings if nothing else uses it. `tests/auth.test.ts` fails if the marker spreads beyond those two files.
+To see the same numbers before upgrading, run this against `data/morphie.db`: `SELECT COUNT(*) FROM users WHERE is_guest = 1 AND email IS NULL;`
+
+`SESSION_SECRET` is still required in production, but nothing signs with it any more (it only verified the old cookie).
 
 ## Releasing
 
@@ -150,7 +157,7 @@ Morphie is designed as a **single-process, local-disk** app. Before putting it o
 - **Run one instance.** Pending approvals, rate-limit counters and the per-conversation "busy" lock are in memory.
 - **Set `ENCRYPTION_KEY` and `SESSION_SECRET`** (required in production; back them up: losing the encryption key makes stored provider keys unreadable), set **`MORPHIE_PUBLIC_URL`** and **`MORPHIE_TRUSTED_PROXY`**, and serve over https (private URLs are already off by default in production).
 - **Serve over HTTPS** (the session cookie becomes `Secure` automatically behind `x-forwarded-proto: https`).
-- There is **no login**. Identity is a browser cookie, so clearing cookies orphans that browser's data. Put it behind your own auth/SSO if multiple people share one deployment.
+- **Configure at least one sign-in method** (email transport, Google or GitHub; see *Setting up sign-in*). There is no guest mode, so a deployment with none configured shows a login popup nobody can use. Data belongs to the account, not the browser, so clearing cookies just signs you out.
 
 ## Testing
 

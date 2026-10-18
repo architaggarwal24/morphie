@@ -1,26 +1,58 @@
 "use client";
 import { create } from "zustand";
-import { api, ApiFailure, streamSSE } from "./api";
+import { api, ApiFailure, setSignedOutHandler, streamSSE } from "./api";
 import { applyEvent, newRun, type RunState } from "./runState";
-import type { AgentEvent, AgentSettings, ConversationView, MessageView, Mode, ProfileView, ProviderSpecView, ToolInfo } from "./types";
+import type { AgentEvent, AgentSettings, ConversationView, LoginMethods, MessageView, Mode, ProfileView, ProviderSpecView, SessionView, ToolInfo } from "./types";
 import { DEFAULT_AGENT_SETTINGS } from "./types";
 
 export type Tab = "chat" | "agent" | "design" | "documents" | "memory" | "settings";
+export const TABS: readonly Tab[] = ["chat", "agent", "design", "documents", "memory", "settings"];
+export const TAB_LABELS: Record<Tab, string> = { chat: "Chat", agent: "Agent", design: "Design", documents: "Documents", memory: "Memory", settings: "Settings" };
+/** A visitor who has not logged in can use exactly one tab. */
+export const PUBLIC_TAB: Tab = "chat";
+
+/** sessionStorage key for a Google/GitHub round trip. Only { tab, draft } is ever kept there, and it is removed as soon as it is read. */
+export const LOGIN_REDIRECT_KEY = "morphie.login";
+export const DRAFT_MAX = 20_000;
+
+/** Where focus returns when the login popup closes (named explicitly: not every browser focuses a button on click). */
+let loginTrigger: HTMLElement | null = null;
+export const getLoginTrigger = (): HTMLElement | null => loginTrigger;
+
+function takeLoginRedirect(): { tab: Tab | null; draft: string } | null {
+  try {
+    const raw = sessionStorage.getItem(LOGIN_REDIRECT_KEY);
+    if (raw === null) return null;
+    sessionStorage.removeItem(LOGIN_REDIRECT_KEY);
+    const v = JSON.parse(raw) as { tab?: unknown; draft?: unknown } | null;
+    return { tab: TABS.includes(v?.tab as Tab) ? (v!.tab as Tab) : null, draft: typeof v?.draft === "string" ? v.draft.slice(0, DRAFT_MAX) : "" };
+  } catch { return null; }
+}
 export type ThemePref = "system" | "light" | "dark";
 
 export interface CustomPreset { id: string; label: string; baseUrl: string; note: string; options?: Record<string, unknown> }
 export interface Toast { id: number; kind: "error" | "ok" | "info"; text: string }
 
+/** What a signed-in user gets from /api/bootstrap. */
 interface Bootstrap {
-  version: string; catalog: ProviderSpecView[]; customPresets: CustomPreset[]; profiles: ProfileView[]; activeId: string | null;
+  version: string; methods: LoginMethods; session: SessionView;
+  catalog: ProviderSpecView[]; customPresets: CustomPreset[]; profiles: ProfileView[]; activeId: string | null;
   settings: AgentSettings; tools: ToolInfo[]; search: { user: boolean; server: boolean }; conversations: ConversationView[];
   server: { allowPrivateUrls: boolean; maxUploadMb: number; maxAgentSteps: number };
 }
+/** What anyone without a session gets: just enough to draw the sign-in screen. */
+interface AnonymousBootstrap { version: string; methods: LoginMethods; session: null }
+
+/** What a visitor asked for when the login popup opened (a locked tab, "connect a provider"...). Resumed after login. */
+interface LoginOpts { tab?: Tab | null; trigger?: HTMLElement | null }
 
 interface State {
   ready: boolean;
   loadError: string | null;
   version: string;
+  /** null = nobody is signed in: the app shows the sign-in screen and nothing else. */
+  session: SessionView | null;
+  methods: LoginMethods;
   catalog: ProviderSpecView[];
   customPresets: CustomPreset[];
   profiles: ProfileView[];
@@ -31,6 +63,11 @@ interface State {
   server: Bootstrap["server"];
 
   tab: Tab;
+  /** The login popup, and the tab to open once it succeeds (null = no preference). */
+  loginOpen: boolean;
+  pendingTab: Tab | null;
+  /** What's typed in each composer. It lives here so it survives the login popup, tab switches and the login round trip. */
+  drafts: Record<Mode, string>;
   settingsSection: string;
   sidebarOpen: boolean;
   inspectorOpen: boolean;
@@ -44,7 +81,17 @@ interface State {
   toasts: Toast[];
 
   boot(): Promise<void>;
-  setTab(t: Tab): void;
+  /** The server says the session is gone (expired, revoked): go back to the sign-in screen. */
+  signedOut(): void;
+  /** Logged-out visitors can only open Chat: any other tab opens the login popup instead and the tab does not switch. */
+  setTab(t: Tab, trigger?: HTMLElement | null): void;
+  openLogin(opts?: LoginOpts): void;
+  closeLogin(): void;
+  /** Called just before leaving for Google/GitHub: keeps { tab, draft } for the way back. */
+  saveLoginRedirect(): void;
+  setDraft(mode: Mode, text: string): void;
+  /** Send what's typed. Logged out, this opens the login popup and keeps the draft. */
+  sendDraft(mode: Mode, trigger?: HTMLElement | null): void;
   setSettingsSection(s: string): void;
   toggleSidebar(open?: boolean): void;
   toggleInspector(open?: boolean): void;
@@ -77,22 +124,62 @@ const raf: (fn: () => void) => void = typeof requestAnimationFrame === "function
 const errText = (e: unknown) => (e instanceof ApiFailure ? e.message : e instanceof Error ? e.message : "Something went wrong.");
 
 export const useStore = create<State>((set, get) => ({
-  ready: false, loadError: null, version: "", catalog: [], customPresets: [], profiles: [], activeId: null,
+  ready: false, loadError: null, version: "", session: null, methods: { email: false, google: false, github: false }, catalog: [], customPresets: [], profiles: [], activeId: null,
   settings: DEFAULT_AGENT_SETTINGS, tools: [], search: { user: false, server: false }, server: { allowPrivateUrls: true, maxUploadMb: 10, maxAgentSteps: 30 },
-  tab: "chat", settingsSection: "providers", sidebarOpen: false, inspectorOpen: true, paletteOpen: false, theme: "system",
+  tab: "chat", loginOpen: false, pendingTab: null, drafts: { chat: "", agent: "" }, settingsSection: "providers", sidebarOpen: false, inspectorOpen: true, paletteOpen: false, theme: "system",
   conversations: [], activeConv: { chat: null, agent: null }, messages: {}, run: null, toasts: [],
 
   async boot() {
     try {
-      const b = await api<Bootstrap>("/api/bootstrap");
+      const b = await api<Bootstrap | AnonymousBootstrap>("/api/bootstrap");
       let theme: ThemePref = "system";
       try { const t = localStorage.getItem("morphie.theme"); if (t === "light" || t === "dark") theme = t; } catch { /* storage blocked */ }
-      set({ ready: true, loadError: null, theme, ...b, tab: b.profiles.length ? get().tab : "settings" });
+      // Back from Google/GitHub: put the draft back whether or not the login worked, so nothing typed is lost.
+      const returned = takeLoginRedirect();
+      const drafts = returned?.draft ? { ...get().drafts, chat: returned.draft } : get().drafts;
+      if (!b.session) { set({ ready: true, loadError: null, theme, version: b.version, methods: b.methods, session: null, drafts }); return; }
+      // The tab the visitor asked for before logging in wins; otherwise a brand-new account starts at Providers.
+      const wanted = get().pendingTab ?? returned?.tab ?? null;
+      set({ ready: true, loadError: null, theme, ...b, drafts, loginOpen: false, pendingTab: null, tab: wanted ?? (b.profiles.length ? get().tab : "settings") });
     } catch (e) {
       set({ loadError: errText(e) });
     }
   },
-  setTab: (tab) => set({ tab, sidebarOpen: false }),
+  signedOut() {
+    if (!get().session) return;
+    controller?.abort();
+    // The session ended while the page was open: back to what a visitor sees, with nothing of the account left in memory.
+    set({
+      session: null, tab: PUBLIC_TAB, loginOpen: false, pendingTab: null, settingsSection: "providers", sidebarOpen: false,
+      profiles: [], activeId: null, settings: DEFAULT_AGENT_SETTINGS, tools: [], search: { user: false, server: false },
+      conversations: [], activeConv: { chat: null, agent: null }, messages: {}, run: null,
+    });
+    get().toast("info", "You've been logged out. Log in to continue.");
+  },
+  setTab(tab, trigger) {
+    if (!get().session && tab !== PUBLIC_TAB) { get().openLogin({ tab, trigger }); return; }
+    set({ tab, sidebarOpen: false });
+  },
+  openLogin(opts = {}) {
+    const active = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
+    loginTrigger = opts.trigger ?? (active && active !== document.body && !active.closest('[role="dialog"]') ? active : null);
+    set({ loginOpen: true, pendingTab: opts.tab ?? null, paletteOpen: false });
+  },
+  closeLogin: () => set({ loginOpen: false, pendingTab: null }),
+  saveLoginRedirect() {
+    try { sessionStorage.setItem(LOGIN_REDIRECT_KEY, JSON.stringify({ tab: get().pendingTab, draft: get().drafts.chat })); } catch { /* storage blocked: the draft just isn't restored */ }
+  },
+  setDraft: (mode, text) => set((s) => ({ drafts: { ...s.drafts, [mode]: text } })),
+  sendDraft(mode, trigger) {
+    const s = get();
+    const text = s.drafts[mode].trim();
+    if (!text || text.length > DRAFT_MAX) return;
+    if (!s.session) { get().openLogin({ tab: PUBLIC_TAB, trigger }); return; } // the draft stays where it is
+    if (s.run && s.run.status !== "done" && s.run.status !== "error") return;
+    if (!s.activeId) { get().toast("error", "Add an AI provider in Settings first."); set({ tab: "settings", settingsSection: "providers" }); return; }
+    set((st) => ({ drafts: { ...st.drafts, [mode]: "" } }));
+    void get().send(text);
+  },
   setSettingsSection: (settingsSection) => set({ settingsSection }),
   toggleSidebar: (open) => set((s) => ({ sidebarOpen: open ?? !s.sidebarOpen })),
   toggleInspector: (open) => set((s) => ({ inspectorOpen: open ?? !s.inspectorOpen })),
@@ -127,6 +214,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async refreshConversations(q) {
+    if (!get().session) return; // a visitor has no conversations to fetch
     try {
       const r = await api<{ conversations: ConversationView[] }>(`/api/conversations${q ? `?q=${encodeURIComponent(q)}` : ""}`);
       set({ conversations: r.conversations });
@@ -170,6 +258,7 @@ export const useStore = create<State>((set, get) => ({
 
   async send(message, opts = {}) {
     const s = get();
+    if (!s.session) { get().openLogin({ tab: PUBLIC_TAB }); return; }
     if (s.run && s.run.status !== "done" && s.run.status !== "error") return;
     const mode: Mode = s.tab === "agent" ? "agent" : "chat";
     if (!s.activeId) { get().toast("error", "Add an AI provider in Settings first."); set({ tab: "settings", settingsSection: "providers" }); return; }
@@ -227,3 +316,5 @@ export const useStore = create<State>((set, get) => ({
     catch (e) { get().toast("error", errText(e)); }
   },
 }));
+
+setSignedOutHandler(() => useStore.getState().signedOut());

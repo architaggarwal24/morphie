@@ -52,7 +52,7 @@ export function MemoryView() {
         ) : (
           <>
             <div className="flex items-center gap-3">
-              <div className="relative flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-faint" aria-hidden /><Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter memories" aria-label="Filter memories" className="h-9 pl-8 text-[13px]" /></div>
+              <div className="relative flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-faint" aria-hidden /><Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter memories" aria-label="Filter memories" className="h-9! pl-8" /></div>
               <span className="text-xs text-muted">{items.length} saved</span>
               <Button size="sm" variant="ghost" className="hover:text-err" onClick={() => setClear(true)}>Clear all</Button>
             </div>

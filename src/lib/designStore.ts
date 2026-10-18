@@ -119,3 +119,6 @@ export const useDesign = create<DesignStore>((set, get) => ({
     } catch (e) { toast("error", errText(e)); }
   },
 }));
+
+// When the session ends, drop every design held in memory: whoever logs in next on this page must never see them.
+useStore.subscribe((s, prev) => { if (prev.session && !s.session) { controller?.abort(); useDesign.setState(useDesign.getInitialState(), true); } });

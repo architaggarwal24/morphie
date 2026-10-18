@@ -34,6 +34,9 @@ export function ChatView({ mode }: { mode: Mode }) {
   const toggleInspector = useStore((s) => s.toggleInspector);
   const inspectorOpen = useStore((s) => s.inspectorOpen);
   const hasProvider = useStore((s) => !!s.activeId);
+  const loggedIn = useStore((s) => !!s.session);
+  const setDraft = useStore((s) => s.setDraft);
+  const openLogin = useStore((s) => s.openLogin);
 
   const live = !!run && run.mode === mode && run.convId === convId;
   const running = !!run && (run.status === "connecting" || run.status === "running" || run.status === "waiting");
@@ -66,7 +69,7 @@ export function ChatView({ mode }: { mode: Mode }) {
           <IconButton label="Open conversations" className="md:hidden" onClick={() => toggleSidebar(true)}><Menu className="size-[18px]" /></IconButton>
           <Icon className="hidden size-4 text-muted sm:block" aria-hidden />
           <h1 className="min-w-0 flex-1 truncate text-sm font-medium">{title ?? (mode === "agent" ? "New task" : "New chat")}</h1>
-          {mode === "agent" && <Badge tone="accent" className="hidden sm:inline-flex">Autonomous</Badge>}
+          {mode === "agent" && <Badge tone="accent" className="max-sm:hidden">Autonomous</Badge>}
           {mode === "agent" && <IconButton label={inspectorOpen ? "Hide task panel" : "Show task panel"} active={inspectorOpen} onClick={() => toggleInspector()}><PanelRight className="size-[18px]" /></IconButton>}
         </header>
 
@@ -84,7 +87,9 @@ export function ChatView({ mode }: { mode: Mode }) {
                 </p>
                 <div className="mt-7 grid gap-2.5 sm:grid-cols-2">
                   {SUGGESTIONS[mode].map((s) => (
-                    <button key={s.title} disabled={!hasProvider || running} onClick={() => send(s.prompt)} className="group rounded-xl border border-line bg-panel p-3.5 text-left transition hover:-translate-y-0.5 hover:border-accent/50 hover:shadow-card disabled:opacity-50 disabled:hover:translate-y-0">
+                    <button key={s.title} disabled={(loggedIn && !hasProvider) || running}
+                      // A visitor can't send yet: the prompt goes into the composer and the login popup opens, so after logging in it is waiting there.
+                      onClick={(e) => { if (loggedIn) void send(s.prompt); else { setDraft(mode, s.prompt); openLogin({ tab: "chat", trigger: e.currentTarget }); } }} className="group rounded-xl border border-line bg-panel p-3.5 text-left transition hover:-translate-y-0.5 hover:border-accent/50 hover:shadow-card disabled:opacity-50 disabled:hover:translate-y-0">
                       <div className="text-[13px] font-medium">{s.title}</div>
                       <div className="mt-1 line-clamp-2 text-[13px] leading-snug text-muted">{s.prompt}</div>
                     </button>
@@ -116,7 +121,7 @@ export function ChatView({ mode }: { mode: Mode }) {
           </button>
         )}
         {busyElsewhere && <p className="mx-auto max-w-3xl px-4 pb-1 text-center text-xs text-muted">Another conversation is still running. You can start here once it finishes.</p>}
-        <Composer mode={mode} running={running && live} onSend={(t) => send(t)} onStop={stop} focusKey={`${mode}:${convId ?? "new"}`} />
+        <Composer mode={mode} running={running && live} onStop={stop} focusKey={`${mode}:${convId ?? "new"}`} />
       </section>
       {mode === "agent" && <AgentInspector convId={convId} messages={messages} />}
     </div>

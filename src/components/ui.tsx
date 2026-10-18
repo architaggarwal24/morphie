@@ -1,13 +1,13 @@
 "use client";
 import clsx from "clsx";
 import { Loader2, X } from "lucide-react";
-import { forwardRef, useEffect, useId, useRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { forwardRef, useEffect, useId, useRef, type ButtonHTMLAttributes, type ComponentProps, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 
 export const cn = clsx;
 
 type BtnVariant = "primary" | "secondary" | "ghost" | "danger" | "soft";
 const VARIANTS: Record<BtnVariant, string> = {
-  primary: "bg-accent text-accent-fg hover:brightness-110 shadow-sm",
+  primary: "bg-accent text-accent-fg hover:brightness-110 shadow-xs",
   secondary: "bg-raised text-fg border border-line hover:border-faint/60",
   soft: "bg-accent/10 text-accent hover:bg-accent/15",
   ghost: "text-muted hover:text-fg hover:bg-raised",
@@ -40,13 +40,13 @@ export function Switch({ checked, onChange, label, disabled }: { checked: boolea
   return (
     <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)}
       className={cn("relative h-6 w-10 shrink-0 rounded-full transition disabled:opacity-50", checked ? "bg-accent" : "bg-line")}>
-      <span className={cn("absolute top-0.5 size-5 rounded-full bg-white shadow transition-all", checked ? "left-[18px]" : "left-0.5")} />
+      <span className={cn("absolute top-0.5 size-5 rounded-full bg-white shadow-sm transition-all", checked ? "left-[18px]" : "left-0.5")} />
     </button>
   );
 }
 
-const field = "w-full rounded-xl border border-line bg-sunken px-3 text-sm text-fg placeholder:text-faint outline-none transition focus:border-accent/70 focus:ring-2 focus:ring-accent/20 disabled:opacity-60";
-export function Input({ className, ...p }: InputHTMLAttributes<HTMLInputElement>) { return <input {...p} className={cn(field, "h-10", className)} />; }
+const field = "w-full rounded-xl border border-line bg-sunken px-3 text-sm text-fg placeholder:text-faint outline-hidden transition focus:border-accent/70 focus:ring-2 focus:ring-accent/20 disabled:opacity-60";
+export function Input({ className, ...p }: ComponentProps<"input">) { return <input {...p} className={cn(field, "h-10", className)} />; }
 export function Textarea({ className, ...p }: TextareaHTMLAttributes<HTMLTextAreaElement>) { return <textarea {...p} className={cn(field, "py-2.5 leading-relaxed resize-y", className)} />; }
 export function Select({ className, children, ...p }: SelectHTMLAttributes<HTMLSelectElement>) { return <select {...p} className={cn(field, "h-10 pr-8", className)}>{children}</select>; }
 
@@ -82,16 +82,27 @@ export function EmptyState({ icon, title, children, action }: { icon?: ReactNode
   );
 }
 
-export function Dialog({ open, onClose, title, description, children, width = "max-w-lg", footer }: { open: boolean; onClose: () => void; title: string; description?: string; children: ReactNode; width?: string; footer?: ReactNode }) {
+export function Dialog({ open, onClose, title, description, children, width = "max-w-lg", footer, returnFocus, scrimClassName = "backdrop-blur-[2px]" }: {
+  open: boolean; onClose: () => void; title: string; description?: string; children: ReactNode; width?: string; footer?: ReactNode;
+  /** Where focus goes when the dialog closes. Defaults to whatever had focus when it opened (some browsers don't focus a button on click, so a caller can name it). Keep it a stable function. */
+  returnFocus?: () => HTMLElement | null;
+  /** Replaces the default blur on the dimmed backdrop. */
+  scrimClassName?: string;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  const descId = useId();
+  // The latest callbacks, read from a ref so that a parent re-rendering (a toast expiring, say) with new function
+  // identities never re-runs the effect below, which would snap focus back to the first field mid-typing.
+  const latest = useRef({ onClose, returnFocus });
+  useEffect(() => { latest.current = { onClose, returnFocus }; });
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement as HTMLElement | null;
     const node = ref.current;
     node?.querySelector<HTMLElement>("[data-autofocus], input, textarea, select, button:not([data-close])")?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.stopPropagation(); onClose(); }
+      if (e.key === "Escape") { e.stopPropagation(); latest.current.onClose(); }
       if (e.key === "Tab" && node) {
         const f = [...node.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),select,textarea,[tabindex]:not([tabindex="-1"])')].filter((x) => x.offsetParent !== null);
         if (!f.length) return;
@@ -101,17 +112,21 @@ export function Dialog({ open, onClose, title, description, children, width = "m
       }
     };
     document.addEventListener("keydown", onKey, true);
-    return () => { document.removeEventListener("keydown", onKey, true); previous?.focus?.(); };
-  }, [open, onClose]);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      const back = latest.current.returnFocus?.();
+      (back?.isConnected ? back : previous)?.focus?.();
+    };
+  }, [open]);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 grid place-items-center p-4">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px] animate-rise" onClick={onClose} aria-hidden />
-      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} className={cn("relative flex max-h-[90dvh] w-full flex-col rounded-2xl bg-panel shadow-pop animate-rise", width)}>
+      <div className={cn("absolute inset-0 bg-black/50 animate-rise", scrimClassName)} onClick={onClose} aria-hidden />
+      <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descId : undefined} className={cn("relative flex max-h-[90dvh] w-full flex-col rounded-2xl bg-panel shadow-pop animate-rise", width)}>
         <header className="flex items-start justify-between gap-4 px-6 pt-5">
           <div>
             <h2 id={titleId} className="font-display text-xl leading-tight">{title}</h2>
-            {description && <p className="mt-1 text-sm text-muted">{description}</p>}
+            {description && <p id={descId} className="mt-1 text-sm text-muted">{description}</p>}
           </div>
           <IconButton label="Close" onClick={onClose} data-close className="-mr-2 -mt-1"><X className="size-4" /></IconButton>
         </header>

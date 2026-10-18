@@ -8,16 +8,15 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
- * Check the code and sign in. The user types it in the same tab, so the browser still holds its guest session:
- * it is rotated into the account's session and the guest is remembered for the claim step.
- * Every kind of failure answers identically.
+ * Check the code and sign in (the same step also signs up an address that has no account yet). Any session the
+ * browser already holds is rotated into a fresh one. Every kind of failure answers identically.
  */
 export const POST = route({ auth: "public", rate: { bucket: "auth-email-verify", limit: 20, windowMs: 3_600_000 } }, async (c) => {
   if (!emailLoginEnabled()) throw new ApiError(404, "Email sign-in isn't available on this server.", "disabled");
   const b = await c.body(z.object({ email: z.string().max(254), code: z.string().max(12) }), 2_000);
   const result = verifyCode(normalizeEmail(b.email), b.code);
   if (!result.ok) throw new ApiError(400, "That code didn't work. Check it, or ask for a new one.", "invalid_code");
-  const { cookie, guestLinked } = finishLogin(c.req, c.ip, c.session, result.user.id);
+  const { cookie } = finishLogin(c.req, c.ip, c.session, result.user.id);
   c.cookies.push(cookie);
-  return { ok: true, user: { email: result.user.email, displayName: result.user.displayName }, created: result.created, guestLinked };
+  return { ok: true, user: { email: result.user.email, displayName: result.user.displayName }, created: result.created };
 });

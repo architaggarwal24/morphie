@@ -4,6 +4,10 @@ export class ApiFailure extends Error {
   }
 }
 
+let onSignedOut: (() => void) | null = null;
+/** The store registers this: a 401 "unauthenticated" answer means the session ended, so the page returns to the sign-in screen. */
+export function setSignedOutHandler(fn: (() => void) | null): void { onSignedOut = fn; }
+
 async function failure(res: Response): Promise<ApiFailure> {
   let message = `Request failed (${res.status}).`;
   let code: string | undefined;
@@ -12,6 +16,7 @@ async function failure(res: Response): Promise<ApiFailure> {
     if (j?.error) message = String(j.error);
     code = j?.code;
   } catch { /* non-JSON error body */ }
+  if (res.status === 401 && code === "unauthenticated") onSignedOut?.();
   return new ApiFailure(message, res.status, code);
 }
 

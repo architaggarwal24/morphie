@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { config } from "./config";
 import type { DB } from "./db";
 
 /**
@@ -17,11 +20,71 @@ function addColumn(conn: DB, table: string, column: string, ddl: string): boolea
   return true;
 }
 
+
+/** Tables with a user_id column. Keep in step with USER_CONTENT_TABLES in data/users.ts (db.ts imports this file, so it can't import that one). */
+const USER_DATA_TABLES = ["designs", "conversations", "chunks", "documents", "memories", "user_secrets", "user_settings", "provider_profiles"] as const;
+
+/**
+ * Guests were users rows that never signed up. A row is only ever treated as one when everything agrees: it is flagged
+ * is_guest and it has no email (accounts are only created from a proven email). So even a database whose
+ * schema_migrations was lost and replayed (001 re-adds is_guest with DEFAULT 1 to every row) cannot lose an account.
+ */
+const GUEST_USERS = "SELECT id FROM users WHERE is_guest = 1 AND email IS NULL";
+
+export interface GuestPurgePlan {
+  userIds: string[];
+  /** Of those, the ones that existed before sessions did (the old anonymous-cookie identities). */
+  legacyAnonymous: number;
+  sessions: number;
+  /** Rows that belong to those users, by table (messages and design_versions are counted through their parents). */
+  rows: Record<string, number>;
+}
+
+/** Read-only: what migration 003 is about to delete. */
+export function planGuestPurge(conn: DB): GuestPurgePlan {
+  if (!hasColumn(conn, "users", "is_guest")) return { userIds: [], legacyAnonymous: 0, sessions: 0, rows: {} };
+  const count = (sql: string): number => conn.prepare(sql).get().n as number;
+  const rows: Record<string, number> = {};
+  for (const t of USER_DATA_TABLES) rows[t] = count(`SELECT COUNT(*) AS n FROM ${t} WHERE user_id IN (${GUEST_USERS})`);
+  rows.messages = count(`SELECT COUNT(*) AS n FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id IN (${GUEST_USERS}))`);
+  rows.design_versions = count(`SELECT COUNT(*) AS n FROM design_versions WHERE design_id IN (SELECT id FROM designs WHERE user_id IN (${GUEST_USERS}))`);
+  rows.user_identities = count(`SELECT COUNT(*) AS n FROM user_identities WHERE user_id IN (${GUEST_USERS})`);
+  return {
+    userIds: (conn.prepare(GUEST_USERS).all() as Array<{ id: string }>).map((r) => r.id),
+    legacyAnonymous: hasColumn(conn, "users", "legacy_anonymous") ? count(`SELECT COUNT(*) AS n FROM users WHERE id IN (${GUEST_USERS}) AND legacy_anonymous = 1`) : 0,
+    sessions: count(`SELECT COUNT(*) AS n FROM sessions WHERE user_id IN (${GUEST_USERS})`),
+    rows,
+  };
+}
+
+function describePlan(p: GuestPurgePlan): string {
+  if (!p.userIds.length) return "0 guest users. Nothing to delete";
+  const data = Object.entries(p.rows).filter(([, n]) => n > 0).map(([t, n]) => `${n} ${t}`).join(", ") || "no data rows";
+  const legacy = p.legacyAnonymous ? ` (${p.legacyAnonymous} of them old pre-session identities)` : "";
+  return `${p.userIds.length} guest user(s)${legacy}, ${p.sessions} session(s), ${data}, plus their workspace folders. Deleting them now`;
+}
+
+/** Remove the workspace folders of deleted users. Ids are re-validated so a corrupt row can never point outside data/workspace. */
+function removeWorkspaces(userIds: string[]): void {
+  const root = path.resolve(config.dataDir, "workspace");
+  for (const id of userIds) {
+    if (!/^[A-Za-z0-9_-]{8,64}$/.test(id)) continue;
+    const dir = path.resolve(root, id);
+    if (!dir.startsWith(root + path.sep)) continue;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function dropColumn(conn: DB, table: string, column: string): void {
+  if (hasColumn(conn, table, column)) conn.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+}
+
 export const MIGRATIONS: Migration[] = [
   {
     id: "001_users_and_sessions",
     up(conn) {
-      const firstRun = !hasColumn(conn, "users", "is_guest");
+      // A database that already has `email` has been through this step (003 later drops is_guest again), so it is not a first run.
+      const firstRun = !hasColumn(conn, "users", "is_guest") && !hasColumn(conn, "users", "email");
       addColumn(conn, "users", "email", "TEXT");
       addColumn(conn, "users", "email_verified_at", "INTEGER");
       addColumn(conn, "users", "display_name", "TEXT");
@@ -88,6 +151,35 @@ export const MIGRATIONS: Migration[] = [
           used_at INTEGER
         );
       `);
+    },
+  },
+  {
+    // There is no guest mode: no anonymous identity, no cookie and no rows for a visitor who has not signed in.
+    // This removes whatever guest users an earlier build may have created, with their sessions and data, and then the
+    // columns that only existed for them. Replaying it is harmless (it finds nothing and the columns are already gone).
+    id: "003_remove_guests",
+    up(conn) {
+      const plan = planGuestPurge(conn);
+      const anyUsers = (conn.prepare("SELECT COUNT(*) AS n FROM users").get().n as number) > 0;
+      // The count is printed BEFORE anything is deleted. A brand-new, empty database has nothing worth reporting.
+      if (anyUsers) console.info(`[migrate] 003_remove_guests dry-run count: ${describePlan(plan)}.`);
+
+      if (plan.userIds.length) {
+        const guests = `(${GUEST_USERS})`;
+        conn.exec(`
+          DELETE FROM design_versions WHERE design_id IN (SELECT id FROM designs WHERE user_id IN ${guests});
+          DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id IN ${guests});
+          ${USER_DATA_TABLES.map((t) => `DELETE FROM ${t} WHERE user_id IN ${guests};`).join("\n          ")}
+          DELETE FROM user_identities WHERE user_id IN ${guests};
+          DELETE FROM sessions WHERE user_id IN ${guests};
+          DELETE FROM users WHERE id IN ${guests};
+        `);
+      }
+      dropColumn(conn, "users", "is_guest");
+      dropColumn(conn, "users", "legacy_anonymous");
+      dropColumn(conn, "sessions", "linked_guest_user_id");
+      // Files last: if anything above failed the whole step rolls back and no file has been touched.
+      removeWorkspaces(plan.userIds);
     },
   },
 ];

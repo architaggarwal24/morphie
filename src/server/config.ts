@@ -53,9 +53,6 @@ export const config = {
     if (!Number.isInteger(n) || n < 0 || n > 10) throw new Error(`MORPHIE_TRUSTED_PROXY must be false, true or a number of proxies 0-10 (got "${raw}")`);
     return n;
   },
-  get maxNewIdentitiesPerHour(): number {
-    return envInt("MORPHIE_MAX_NEW_IDENTITIES_PER_HOUR", 30, 1);
-  },
   get ipRatePerMinute(): number {
     return envInt("MORPHIE_IP_RATE_PER_MIN", 600, 1);
   },
@@ -65,12 +62,8 @@ export const config = {
     return raw ? raw.replace(/\/+$/, "") : undefined;
   },
   // ---- sessions
-  get guestIdleMs(): number { return envInt("MORPHIE_GUEST_IDLE_MIN", 120, 1) * 60_000; },
-  get guestMaxMs(): number { return envInt("MORPHIE_GUEST_MAX_HOURS", 24, 1) * 3_600_000; },
   get userIdleMs(): number { return envInt("MORPHIE_SESSION_IDLE_DAYS", 14, 1) * 86_400_000; },
   get userMaxMs(): number { return envInt("MORPHIE_SESSION_MAX_DAYS", 30, 1) * 86_400_000; },
-  /** One-release shim: turn old morphie_uid cookies into guest sessions. See src/server/auth/legacyCookie.ts. */
-  get acceptLegacyCookie(): boolean { return envBool("MORPHIE_ACCEPT_LEGACY_COOKIE", true); },
   // ---- email login
   get emailTransport(): string | undefined { return process.env.MORPHIE_EMAIL_TRANSPORT?.trim().toLowerCase() || undefined; },
   get emailFrom(): string { return process.env.MORPHIE_EMAIL_FROM?.trim() || "Morphie <no-reply@localhost>"; },

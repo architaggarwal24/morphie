@@ -30,7 +30,7 @@ export function Preview({ html, device, busy }: { html: string; device: Device; 
           />
         </div>
       </div>
-      {busy && <div className="absolute inset-x-0 top-0 h-0.5 overflow-hidden"><div className="h-full w-full animate-shimmer bg-gradient-to-r from-transparent via-accent to-transparent bg-[length:200%_100%]" /></div>}
+      {busy && <div className="absolute inset-x-0 top-0 h-0.5 overflow-hidden"><div className="h-full w-full animate-shimmer bg-linear-to-r/srgb from-transparent via-accent to-transparent bg-[length:200%_100%]" /></div>}
     </div>
   );
 }

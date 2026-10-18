@@ -30,8 +30,8 @@ function KeyValueRows({ rows, onChange, keyPlaceholder, valuePlaceholder, addLab
     <div className="space-y-2">
       {rows.map((r, i) => (
         <div key={i} className="flex gap-2">
-          <Input value={r.k} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} placeholder={keyPlaceholder} aria-label={`${keyPlaceholder} ${i + 1}`} className="font-mono text-[13px]" autoCapitalize="off" spellCheck={false} />
-          <Input value={r.v} type={secretValues ? "password" : "text"} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} placeholder={editing && secretValues ? "unchanged" : valuePlaceholder} aria-label={`${valuePlaceholder} ${i + 1}`} className="font-mono text-[13px]" autoComplete="off" spellCheck={false} />
+          <Input value={r.k} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, k: e.target.value } : x)))} placeholder={keyPlaceholder} aria-label={`${keyPlaceholder} ${i + 1}`} className="font-mono" autoCapitalize="off" spellCheck={false} />
+          <Input value={r.v} type={secretValues ? "password" : "text"} onChange={(e) => onChange(rows.map((x, j) => (j === i ? { ...x, v: e.target.value } : x)))} placeholder={editing && secretValues ? "unchanged" : valuePlaceholder} aria-label={`${valuePlaceholder} ${i + 1}`} className="font-mono" autoComplete="off" spellCheck={false} />
           <button type="button" onClick={() => onChange(rows.filter((_, j) => j !== i))} aria-label="Remove row" className="grid size-10 shrink-0 place-items-center rounded-xl text-muted hover:bg-raised hover:text-err"><X className="size-4" /></button>
         </div>
       ))}
@@ -224,7 +224,7 @@ function ProviderForm({ spec, editing, presets, allowPrivate, onBack, onSaved }:
 
       {spec.editableBaseUrl && (
         <Field label="Base URL" htmlFor="pf-url" hint={isCustom ? <>Usually ends in <code className="font-mono">/v1</code>. Morphie adds <code className="font-mono">/chat/completions</code> and <code className="font-mono">/models</code> itself.</> : undefined}>
-          <Input id="pf-url" value={baseUrl} onChange={(e) => { setBaseUrl(e.target.value); autoFetched.current = false; }} placeholder="https://api.example.com/v1" inputMode="url" spellCheck={false} autoCapitalize="off" className="font-mono text-[13px]" />
+          <Input id="pf-url" value={baseUrl} onChange={(e) => { setBaseUrl(e.target.value); autoFetched.current = false; }} placeholder="https://api.example.com/v1" inputMode="url" spellCheck={false} autoCapitalize="off" className="font-mono" />
           {http && !allowPrivate && <p className="mt-1 text-xs text-warn">Plain http:// sends your key unencrypted. Use https:// for remote providers.</p>}
         </Field>
       )}
@@ -232,7 +232,7 @@ function ProviderForm({ spec, editing, presets, allowPrivate, onBack, onSaved }:
       {(spec.requiresKey || isCustom || spec.kind === "ollama") && (
         <Field label={isCustom ? "API key" : spec.requiresKey ? "API key" : "API key (optional)"} htmlFor="pf-key" hint={<>{editing?.hasKey ? `Saved (${editing.keyHint}). Leave blank to keep it.` : isCustom ? "Leave blank if the endpoint needs no key." : spec.kind === "ollama" ? "Only for Ollama Cloud. Local Ollama needs none." : "Stored encrypted on this machine and never shown again."}{spec.keyUrl && <> <a href={spec.keyUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5 text-accent hover:underline">Get a key <ExternalLink className="size-3" aria-hidden /></a></>}</>}>
           <div className="relative">
-            <Input id="pf-key" type={showKey ? "text" : "password"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} onBlur={keyBlurFetch} placeholder={editing?.hasKey ? "••••••••••••" : "sk-…"} autoComplete="off" spellCheck={false} autoCapitalize="off" className="pr-10 font-mono text-[13px]" />
+            <Input id="pf-key" type={showKey ? "text" : "password"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} onBlur={keyBlurFetch} placeholder={editing?.hasKey ? "••••••••••••" : "sk-…"} autoComplete="off" spellCheck={false} autoCapitalize="off" className="pr-10 font-mono" />
             <button type="button" onClick={() => setShowKey((s) => !s)} aria-label={showKey ? "Hide key" : "Show key"} className="absolute right-1.5 top-1/2 grid size-7 -translate-y-1/2 place-items-center rounded-lg text-muted hover:text-fg">{showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</button>
           </div>
         </Field>
@@ -240,7 +240,7 @@ function ProviderForm({ spec, editing, presets, allowPrivate, onBack, onSaved }:
 
       <Field label="Model" htmlFor="pf-model" error={modelsState.error} hint={modelsState.note ?? (isCustom ? "Fetch the list from your provider, or type any model ID." : "Pick one or type any model ID.")}>
         <div className="flex gap-2">
-          <Input id="pf-model" list="pf-models" value={model} onChange={(e) => setModel(e.target.value)} placeholder="model-id" spellCheck={false} autoCapitalize="off" className="font-mono text-[13px]" />
+          <Input id="pf-model" list="pf-models" value={model} onChange={(e) => setModel(e.target.value)} placeholder="model-id" spellCheck={false} autoCapitalize="off" className="font-mono" />
           <datalist id="pf-models">{models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</datalist>
           {spec.canListModels && <Button type="button" variant="secondary" onClick={() => fetchModels()} loading={modelsState.loading} aria-label="Fetch models"><RefreshCw className="size-4" aria-hidden /> <span className="hidden sm:inline">Fetch</span></Button>}
         </div>
@@ -258,7 +258,7 @@ function ProviderForm({ spec, editing, presets, allowPrivate, onBack, onSaved }:
                 <Field label="Authentication" hint={AUTH_STYLES.find((a) => a.v === authStyle)?.hint}>
                   <Select value={authStyle} onChange={(e) => setAuthStyle(e.target.value as AuthStyle)} aria-label="Authentication style">{AUTH_STYLES.map((a) => <option key={a.v} value={a.v}>{a.label}</option>)}</Select>
                 </Field>
-                {authStyle === "header" && <Field label="Header name" htmlFor="pf-hn"><Input id="pf-hn" value={authHeaderName} onChange={(e) => setAuthHeaderName(e.target.value)} placeholder="X-Gateway-Key" className="font-mono text-[13px]" spellCheck={false} /></Field>}
+                {authStyle === "header" && <Field label="Header name" htmlFor="pf-hn"><Input id="pf-hn" value={authHeaderName} onChange={(e) => setAuthHeaderName(e.target.value)} placeholder="X-Gateway-Key" className="font-mono" spellCheck={false} /></Field>}
                 <Field label="Extra headers" hint="Sent with every request (team IDs, org headers…). Values are encrypted and never shown again.">
                   <KeyValueRows rows={headers} onChange={setHeaders} keyPlaceholder="Header-Name" valuePlaceholder="value" addLabel="Add header" secretValues editing={!!editing} />
                 </Field>
@@ -266,8 +266,8 @@ function ProviderForm({ spec, editing, presets, allowPrivate, onBack, onSaved }:
                   <KeyValueRows rows={query} onChange={setQuery} keyPlaceholder="name" valuePlaceholder="value" addLabel="Add parameter" />
                 </Field>
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <Field label="Chat path" htmlFor="pf-cp" hint="Default /chat/completions"><Input id="pf-cp" value={chatPath} onChange={(e) => setChatPath(e.target.value)} placeholder="/chat/completions" className="font-mono text-[13px]" spellCheck={false} /></Field>
-                  <Field label="Models path" htmlFor="pf-mp" hint="Default /models"><Input id="pf-mp" value={modelsPath} onChange={(e) => setModelsPath(e.target.value)} placeholder="/models" className="font-mono text-[13px]" spellCheck={false} /></Field>
+                  <Field label="Chat path" htmlFor="pf-cp" hint="Default /chat/completions"><Input id="pf-cp" value={chatPath} onChange={(e) => setChatPath(e.target.value)} placeholder="/chat/completions" className="font-mono" spellCheck={false} /></Field>
+                  <Field label="Models path" htmlFor="pf-mp" hint="Default /models"><Input id="pf-mp" value={modelsPath} onChange={(e) => setModelsPath(e.target.value)} placeholder="/models" className="font-mono" spellCheck={false} /></Field>
                 </div>
                 <ToggleRow title="Stream responses" hint="Show text as it's written. Turn off if your gateway breaks on streaming." checked={streaming} onChange={setStreaming} />
                 <ToggleRow title="Native tool calling" hint="The model calls tools through the API's function-calling. If agent mode misbehaves, turn this off and Morphie will use prompt-based tools instead." checked={nativeTools} onChange={setNativeTools} />

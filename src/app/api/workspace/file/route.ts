@@ -9,7 +9,7 @@ function wrap<T>(fn: () => T): T {
 }
 const pathOf = (url: URL) => url.searchParams.get("path") ?? "";
 
-export const GET = route({ auth: "guest" }, async (c) => {
+export const GET = route({ auth: "user" }, async (c) => {
   const path = pathOf(c.url);
   const content = wrap(() => readFile(c.actor, path));
   if (c.url.searchParams.get("download")) {
@@ -20,7 +20,7 @@ export const GET = route({ auth: "guest" }, async (c) => {
   return { path, content };
 });
 
-export const DELETE = route({ auth: "guest" }, async (c) => {
+export const DELETE = route({ auth: "user" }, async (c) => {
   wrap(() => deleteFile(c.actor, pathOf(c.url)));
   return { files: listFiles(c.actor) };
 });

@@ -29,7 +29,7 @@ export function ExportDialog({ open, onClose, designId }: { open: boolean; onClo
       footer={<><Button variant="ghost" onClick={onClose}>Close</Button><a href={`/api/design/${designId}/download?format=${format}`}><Button variant="primary"><Download className="size-4" aria-hidden /> Download .zip</Button></a></>}>
       <div className="mb-4 inline-flex rounded-xl border border-line bg-sunken p-1" role="tablist" aria-label="Export format">
         {([["html", "HTML + CSS", "Two files, opens anywhere"], ["react", "React (Vite)", "Component per section"]] as const).map(([v, l, h]) => (
-          <button key={v} role="tab" aria-selected={format === v} onClick={() => setFormat(v)} title={h} className={cn("rounded-lg px-4 py-1.5 text-sm transition", format === v ? "bg-panel font-medium shadow-sm" : "text-muted hover:text-fg")}>{l}</button>
+          <button key={v} role="tab" aria-selected={format === v} onClick={() => setFormat(v)} title={h} className={cn("rounded-lg px-4 py-1.5 text-sm transition", format === v ? "bg-panel font-medium shadow-xs" : "text-muted hover:text-fg")}>{l}</button>
         ))}
       </div>
       {error ? <p className="text-sm text-err" role="alert">{error}</p> : !data ? <div className="grid place-items-center py-16"><Spinner /></div> : (

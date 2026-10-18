@@ -54,7 +54,7 @@ export function ToolsSection() {
         <div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-medium">Web search</h3>{search.user ? <Badge tone="ok">Your key</Badge> : search.server ? <Badge tone="ok">Server key</Badge> : <Badge tone="warn">Not set up</Badge>}</div>
         <p className="text-xs leading-relaxed text-muted">Powered by <a className="text-accent hover:underline" href="https://tavily.com" target="_blank" rel="noopener noreferrer">Tavily</a> (free tier available). Without a key, the model will tell you search isn't available.</p>
         <div className="flex gap-2">
-          <Input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={search.user ? "Replace saved key" : "tvly-…"} autoComplete="off" aria-label="Tavily API key" className="font-mono text-[13px]" />
+          <Input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={search.user ? "Replace saved key" : "tvly-…"} autoComplete="off" aria-label="Tavily API key" className="font-mono" />
           <Button variant="primary" onClick={save} loading={busy} disabled={key.trim().length < 8}>Save</Button>
           {search.user && <Button variant="ghost" onClick={remove}>Remove</Button>}
         </div>
@@ -86,7 +86,7 @@ export function AppearanceSection() {
       <div className="grid gap-3 sm:grid-cols-3" role="radiogroup" aria-label="Theme">
         {opts.map((o) => (
           <button key={o.v} role="radio" aria-checked={theme === o.v} onClick={() => setTheme(o.v)} className={cn("relative rounded-2xl border p-4 text-left transition", theme === o.v ? "border-accent/60 shadow-card" : "border-line hover:border-faint/60")}>
-            <div className={cn("mb-3 h-16 overflow-hidden rounded-lg border border-line p-2", o.v === "dark" ? "bg-[#0d0e11]" : o.v === "light" ? "bg-[#f6f3ee]" : "bg-gradient-to-br from-[#f6f3ee] from-50% to-[#0d0e11] to-50%")} aria-hidden>
+            <div className={cn("mb-3 h-16 overflow-hidden rounded-lg border border-line p-2", o.v === "dark" ? "bg-[#0d0e11]" : o.v === "light" ? "bg-[#f6f3ee]" : "bg-linear-to-br/srgb from-[#f6f3ee] from-50% to-[#0d0e11] to-50%")} aria-hidden>
               <div className={cn("h-2 w-10 rounded-full", o.v === "dark" ? "bg-[#ff6b3d]" : "bg-[#d9481f]")} /><div className={cn("mt-2 h-1.5 w-16 rounded-full opacity-40", o.v === "dark" ? "bg-white" : "bg-black")} /><div className={cn("mt-1.5 h-1.5 w-12 rounded-full opacity-25", o.v === "dark" ? "bg-white" : "bg-black")} />
             </div>
             <span className="flex items-center gap-2 text-sm font-medium"><o.icon className="size-4 text-muted" aria-hidden /> {o.label}</span>

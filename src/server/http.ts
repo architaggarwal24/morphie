@@ -1,9 +1,6 @@
 import { z, ZodType } from "zod";
 import type { Actor, AuthLevel } from "./auth/actor";
-import { clearLegacyCookie, legacyUserId } from "./auth/legacyCookie";
-import {
-  createGuestUser, purgeSessions, readSessionToken, resolveSession, sessionCookie, startSession, type ResolvedSession,
-} from "./auth/session";
+import { purgeSessions, readSessionToken, resolveSession, type ResolvedSession } from "./auth/session";
 import { config } from "./config";
 import { NotFoundError } from "./data/errors";
 import { checkOrigin, clientIp, OriginError, rateLimit, SecurityError } from "./security";
@@ -18,11 +15,11 @@ export interface Ctx<A extends AuthLevel = AuthLevel> {
   req: Request;
   url: URL;
   /**
-   * Who is calling. `public` routes get `Actor | null` (they never create an identity); `guest` routes always get
-   * an actor (a guest session is created if needed); `user` routes only run for a logged-in, non-guest user.
+   * Who is calling. `public` routes get `Actor | null`: a visitor with no valid session is nobody, and nothing here
+   * ever creates an identity for them. `user` routes only run for a signed-in user (anyone else gets 401).
    */
   actor: A extends "public" ? Actor | null : Actor;
-  /** The resolved session for this request, if any (expiry info, linked guest). */
+  /** The resolved session for this request, if any (expiry info). Always set on `user` routes. */
   session: ResolvedSession | null;
   /** Client IP as far as it can be trusted (see MORPHIE_TRUSTED_PROXY), or "unknown". */
   ip: string;
@@ -54,31 +51,16 @@ function jsonError(status: number, message: string, code: string, cookies: strin
 
 let lastPurge = 0;
 
-function authenticate(req: Request, level: AuthLevel, ip: string, cookies: string[]): ResolvedSession | null {
+/**
+ * Resolve the caller's session. Reads only: it never creates a session, a user or a cookie. Sessions come into
+ * being solely through a completed login (src/server/auth/login.ts).
+ */
+function authenticate(req: Request, level: AuthLevel): ResolvedSession | null {
   const token = readSessionToken(req);
   const existing = token ? resolveSession(token) : null;
-  if (existing) {
-    if (level === "user" && existing.actor.isGuest) throw new ApiError(403, "Sign in to use this.", "account_required");
-    return existing;
-  }
+  if (existing) return existing;
   if (level === "public") return null;
-  if (level === "user") throw new ApiError(401, "Sign in to use this.", "unauthenticated");
-
-  // guest level: make sure there is a session. First try the one-release legacy cookie shim, then a brand-new guest.
-  const meta = { ip, userAgent: req.headers.get("user-agent") ?? undefined };
-  // REMOVE-LEGACY-SHIM: delete these lines (and src/server/auth/legacyCookie.ts) when the shim is retired.
-  let userId = legacyUserId(req);
-  if (userId) { cookies.push(clearLegacyCookie()); console.info("[auth] legacy cookie migrated"); }
-  if (!userId) {
-    const wait = rateLimit(`newid:${ip}`, config.maxNewIdentitiesPerHour, 3_600_000);
-    if (wait) throw new ApiError(429, `Too many new sessions from your network. Try again in ${Math.ceil(wait / 60)} min.`, "rate_limited");
-    userId = createGuestUser();
-  }
-  const started = startSession(userId, true, meta);
-  cookies.push(sessionCookie(started.token, started, req));
-  const resolved = resolveSession(started.token);
-  if (!resolved) throw new ApiError(500, "Couldn't start a session.", "internal");
-  return resolved;
+  throw new ApiError(401, "Sign in to use this.", "unauthenticated");
 }
 
 /**
@@ -94,7 +76,7 @@ export function route<A extends AuthLevel>(opts: RouteOptions<A>, handler: (ctx:
       checkOrigin(req);
       const ipWait = rateLimit(`ip:${ip}`, config.ipRatePerMinute, 60_000);
       if (ipWait) throw new ApiError(429, `Slow down — try again in ${ipWait}s.`, "rate_limited");
-      const session = authenticate(req, opts.auth, ip, cookies);
+      const session = authenticate(req, opts.auth);
       const actor = session?.actor ?? null;
       if (opts.rate) {
         const waitUser = rateLimit(`${opts.rate.bucket}:${actor?.userId ?? ip}`, opts.rate.limit, opts.rate.windowMs);

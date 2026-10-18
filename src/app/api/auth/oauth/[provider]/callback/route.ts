@@ -9,7 +9,7 @@ const back = (to: string) => new Response(null, { status: 302, headers: { locati
 
 /**
  * The provider sends the browser back here. Failures redirect to the app with a short error code (never provider
- * text); success rotates the session (keeping the guest session's id for the claim step) and returns to the page.
+ * text); success signs in (or signs up) the account, rotating any session the browser already had, and returns to the page.
  */
 export const GET = route({ auth: "public" }, async (c) => {
   const provider = getProvider(c.params.provider);

@@ -6,7 +6,7 @@ import { assertProviderHostAllowed, createProvider } from "@/server/providers/fa
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const GET = route({ auth: "guest" }, async (c) => listProfiles(c.actor));
+export const GET = route({ auth: "user" }, async (c) => listProfiles(c.actor));
 
 const body = z.object({
   id: z.string().max(40).optional(),
@@ -20,7 +20,7 @@ const body = z.object({
   activate: z.boolean().optional(),
 });
 
-export const POST = route({ auth: "guest", rate: { bucket: "providers", limit: 30, windowMs: 60_000 } }, async (c) => {
+export const POST = route({ auth: "user", rate: { bucket: "providers", limit: 30, windowMs: 60_000 } }, async (c) => {
   const b = await c.body(body);
   if (!specFor(b.kind)) return Response.json({ error: "Unknown provider.", code: "invalid" }, { status: 400 });
   // Validate the whole configuration (URL rules, key present, options) before anything is stored.

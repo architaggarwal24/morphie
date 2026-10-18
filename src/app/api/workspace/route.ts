@@ -4,7 +4,7 @@ import { listFiles, readFile } from "@/server/workspace";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export const GET = route({ auth: "guest" }, async (c) => {
+export const GET = route({ auth: "user" }, async (c) => {
   if (c.url.searchParams.get("zip")) {
     const files = listFiles(c.actor);
     if (!files.length) throw new ApiError(404, "The workspace is empty.", "empty");

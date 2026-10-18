@@ -19,7 +19,7 @@ const body = z.object({
 });
 
 /** Streams AgentEvents as server-sent events. */
-export const POST = route({ auth: "guest", rate: { bucket: "chat", limit: 40, windowMs: 60_000 } }, async (c) => {
+export const POST = route({ auth: "user", rate: { bucket: "chat", limit: 40, windowMs: 60_000 } }, async (c) => {
   const b = await c.body(body);
   // Ownership first: someone else's (or a missing) conversation is a 404 before anything else is looked at.
   let conv = b.conversationId ? getConversation(c.actor, b.conversationId) : null;

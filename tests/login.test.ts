@@ -1,7 +1,6 @@
 import nodeCrypto from "node:crypto";
 import nodemailer from "nodemailer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as bootstrap from "@/app/api/bootstrap/route";
 import * as emailRequest from "@/app/api/auth/email/request/route";
 import * as emailVerify from "@/app/api/auth/email/verify/route";
 import * as oauthStart from "@/app/api/auth/oauth/[provider]/start/route";
@@ -17,10 +16,13 @@ import { hashToken, resolveSession } from "@/server/auth/session";
 import { createConversation } from "@/server/conversations";
 import { sha256 } from "@/server/crypto";
 import { db } from "@/server/db";
-import { _resetTransportForTests, createTransport, MemoryTransport, ResendTransport, SmtpTransport, transport, transportName } from "@/server/email";
+import {
+  _resetDeliveryForTests, _resetTransportForTests, createTransport, deliveryStatus, MemoryTransport, ResendTransport, smtpUrlWithTimeouts, SmtpTransport, transport, transportName,
+} from "@/server/email";
 import { _resetRateLimits } from "@/server/security";
 import { testActor } from "./helpers/actor";
 import { Client } from "./helpers/client";
+import { makeUser, signIn } from "./helpers/users";
 
 const n = (sql: string, ...p: unknown[]) => db().prepare(sql).get(...p).n as number;
 const outbox = () => (transport() as MemoryTransport).outbox;
@@ -34,21 +36,95 @@ const email = (tag = "p") => `${tag}${++seq}-${Math.random().toString(36).slice(
 const ask = (c: Client, address: string) => c.json(emailRequest.POST, "/api/auth/email/request", { method: "POST", body: { email: address } });
 const verify = (c: Client, address: string, code: string) => c.json(emailVerify.POST, "/api/auth/email/verify", { method: "POST", body: { email: address, code } });
 
-beforeEach(() => { _resetRateLimits(); _resetTransportForTests(); setProviderOverrides(undefined); });
+beforeEach(() => { _resetRateLimits(); _resetTransportForTests(); _resetDeliveryForTests(); setProviderOverrides(undefined); });
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); vi.restoreAllMocks(); setProviderOverrides(undefined); });
+
+// ------------------------------------------------------------------ "I never got a code"
+describe("telling the visitor why no code arrived", () => {
+  const session = (c: Client) => c.json(sessionRoute.GET, "/api/auth/session");
+
+  it("in development nothing is emailed: the answer says so, and the code is printed on the server", async () => {
+    vi.stubEnv("MORPHIE_EMAIL_TRANSPORT", "console"); _resetTransportForTests();
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const addr = email();
+    const r = await ask(new Client(), addr);
+    expect(r.status).toBe(200);
+    expect(r.data.delivery).toBe("console");
+    const printed = log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toContain(`[email:dev] to=${addr}`);
+    expect(printed).toMatch(/Your Morphie sign-in code is \d{6}\./);
+  });
+
+  it("the console transport can never exist in production, so that hint can never be shown there", () => {
+    expect(transportName({ NODE_ENV: "production", MORPHIE_EMAIL_TRANSPORT: "console" } as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(transportName({ NODE_ENV: "production" } as NodeJS.ProcessEnv)).toBeUndefined();
+  });
+
+  it("a normal send adds nothing to the answer", async () => {
+    const r = await ask(new Client(), email());
+    expect(r.data).toEqual({ ok: true, expiresInMinutes: 10, resendAfterSeconds: 60 });
+    expect((await session(new Client())).data).not.toHaveProperty("emailDelivery");
+  });
+
+  it("when the mail server rejects the send, the next answers (and the session check) say so, the log says what to check, and a later success clears it", async () => {
+    vi.stubEnv("MORPHIE_EMAIL_TRANSPORT", "smtp"); vi.stubEnv("MORPHIE_SMTP_URL", "smtp://127.0.0.1:1"); _resetTransportForTests(); // nothing listens on port 1
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const first = await ask(new Client(), email());
+    expect(first.data).not.toHaveProperty("delivery");                    // the send hasn't failed yet when the answer goes out (it stays fire-and-forget)
+    await vi.waitFor(() => expect(deliveryStatus()).toBe("failing"), { timeout: 8000 });
+    expect(String(err.mock.calls[0][0])).toMatch(/couldn't send the sign-in email \(smtp\).*MORPHIE_SMTP_URL.*MORPHIE_EMAIL_FROM/);
+    expect(String(err.mock.calls[0][0])).not.toContain("127.0.0.1:1@");     // never the credentials
+
+    const other = await ask(new Client(), email());                       // a different address: the status is about the server, not the address
+    expect(other.data.delivery).toBe("failing");
+    expect((await session(new Client())).data.emailDelivery).toBe("failing");
+
+    vi.unstubAllEnvs(); _resetTransportForTests();                       // back to a working transport
+    await ask(new Client(), email());
+    await vi.waitFor(() => expect(deliveryStatus()).toBeUndefined());
+    expect((await session(new Client())).data).not.toHaveProperty("emailDelivery");
+  }, 20_000);
+
+  it("the delivery status is process-wide, because Next bundles each route separately", async () => {
+    const { noteSend } = await import("@/server/email");
+    noteSend(false);
+    // The route that sends the code and the route that reports on it are different bundles; only globalThis is shared between them.
+    expect((globalThis as { __morphieMailStatus?: { ok: boolean } }).__morphieMailStatus?.ok).toBe(false);
+    noteSend(true);
+    expect((globalThis as { __morphieMailStatus?: { ok: boolean } }).__morphieMailStatus?.ok).toBe(true);
+  });
+
+  it("an old failure is forgotten after 15 minutes", () => {
+    vi.stubEnv("MORPHIE_EMAIL_TRANSPORT", "memory");
+    return import("@/server/email").then(({ noteSend }) => {
+      noteSend(false, 1_000);
+      expect(deliveryStatus(1_000 + 14 * 60_000)).toBe("failing");
+      expect(deliveryStatus(1_000 + 16 * 60_000)).toBeUndefined();
+    });
+  });
+
+  it("SMTP connections give up in seconds, not nodemailer's two minutes, without touching the credentials or anything already set", () => {
+    const out = new URL(smtpUrlWithTimeouts("smtps://user:p%40ss@mail.example.com:465"));
+    expect(out.protocol).toBe("smtps:"); expect(out.username).toBe("user"); expect(out.password).toBe("p%40ss"); expect(out.port).toBe("465");
+    expect(out.searchParams.get("connectionTimeout")).toBe("10000");
+    expect(out.searchParams.get("greetingTimeout")).toBe("10000");
+    expect(out.searchParams.get("socketTimeout")).toBe("20000");
+    expect(new URL(smtpUrlWithTimeouts("smtp://h:587?connectionTimeout=500&pool=true")).searchParams.get("connectionTimeout")).toBe("500");
+    expect(new URL(smtpUrlWithTimeouts("smtp://h:587?pool=true")).searchParams.get("pool")).toBe("true");
+    expect(smtpUrlWithTimeouts("not a url")).toBe("not a url");
+  });
+});
 
 // ------------------------------------------------------------------ email codes
 describe("email one-time code", () => {
-  it("emails a 6-digit code; the same tab verifies it, creating the account and rotating the guest session", async () => {
-    const tab = new Client();
-    await tab.call(bootstrap.GET, "/api/bootstrap"); // a guest, with some work
-    const guestToken = tab.sessionToken!;
-    const guestId = resolveSession(guestToken)!.actor.userId;
-    createConversation(testActor(guestId), "chat", "Guest work");
+  it("emails a 6-digit code; the same tab verifies it, which signs the address up and starts a session", async () => {
+    const tab = new Client(); // a visitor: no cookie, no identity
+    expect(tab.sessionToken).toBeUndefined();
     const addr = email();
     const r = await ask(tab, addr);
     expect(r.status).toBe(200);
     expect(r.data).toEqual({ ok: true, expiresInMinutes: 10, resendAfterSeconds: 60 });
+    expect(tab.sessionToken).toBeUndefined(); // asking for a code gives nobody a session
     const code = lastCode(addr);
     expect(code).toMatch(/^\d{6}$/);
     expect(outbox().find((m) => m.to === addr)!.text).not.toMatch(/https?:\/\//); // a code, not a link
@@ -56,14 +132,22 @@ describe("email one-time code", () => {
 
     const v = await verify(tab, addr, code);
     expect(v.status).toBe(200);
-    expect(v.data).toMatchObject({ ok: true, created: true, guestLinked: true, user: { email: addr } });
-    expect(resolveSession(guestToken)).toBeNull();                       // old (guest) token is dead: rotated
+    expect(v.data).toMatchObject({ ok: true, created: true, user: { email: addr } });
+    expect(v.data).not.toHaveProperty("guestLinked");
     const now = resolveSession(tab.sessionToken!)!;
-    expect(now.actor.isGuest).toBe(false);
     expect(now.user.email).toBe(addr);
-    expect(now.linkedGuestUserId).toBe(guestId);                          // remembered for the claim step
-    expect(n("SELECT COUNT(*) AS n FROM conversations WHERE user_id = ?", guestId)).toBe(1); // nothing merged or lost yet
-    expect(tab.jar.get("morphie_session")).not.toBe(guestToken);
+    expect(now.actor).not.toHaveProperty("isGuest");
+    expect(tab.jar.has("morphie_session")).toBe(true);
+  });
+
+  it("a session the browser already holds is rotated into the new one, and the old token dies", async () => {
+    const tab = new Client(); const before = signIn(tab, makeUser().userId);
+    const addr = email(); await ask(tab, addr);
+    const v = await verify(tab, addr, lastCode(addr));
+    expect(v.status).toBe(200);
+    expect(resolveSession(before.token)).toBeNull();
+    expect(tab.sessionToken).not.toBe(before.token);
+    expect(resolveSession(tab.sessionToken!)!.user.email).toBe(addr);
   });
 
   it("a returning user (same email, any casing/whitespace) gets the same account", async () => {
@@ -77,13 +161,6 @@ describe("email one-time code", () => {
     const b = await verify(again, addr.toUpperCase(), lastCode(addr));
     expect(b.data).toMatchObject({ ok: true, created: false });
     expect(resolveSession(again.sessionToken!)!.actor.userId).toBe(resolveSession(first.sessionToken!)!.actor.userId);
-  });
-
-  it("works for a visitor with no session at all (nothing to link)", async () => {
-    const addr = email(); const c = new Client();
-    await ask(c, addr);
-    const v = await verify(c, addr, lastCode(addr));
-    expect(v.data).toMatchObject({ ok: true, guestLinked: false });
   });
 
   it("a code works exactly once: a replay fails, and so does a simultaneous double-submit", async () => {
@@ -264,10 +341,9 @@ describe("OAuth: state, PKCE, redirect URI", () => {
     expect(g.state.challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
-  it("completes a login: PKCE verifier matches the challenge, session is rotated, guest id is kept for the claim", async () => {
+  it("completes a login: PKCE verifier matches the challenge, and any session the browser held is rotated", async () => {
     const g = fakeProvider("google"); setProviderOverrides({ google: g.p });
-    const c = new Client(); await c.call(bootstrap.GET, "/api/bootstrap");
-    const guestToken = c.sessionToken!; const guestId = resolveSession(guestToken)!.actor.userId;
+    const c = new Client(); const previous = signIn(c, makeUser().userId);
     const s = stateOf(await start(c, "google", "?returnTo=/settings?tab=account"));
     const res = await callback(c, "google", `code=abc&state=${s}`);
     expect(res.status).toBe(302);
@@ -275,17 +351,29 @@ describe("OAuth: state, PKCE, redirect URI", () => {
     expect(g.calls).toHaveLength(1);
     expect(pkceChallenge(g.calls[0].verifier)).toBe(g.state.challenge);
     expect(g.calls[0].redirectUri).toBe("http://localhost:3000/api/auth/oauth/google/callback");
-    expect(resolveSession(guestToken)).toBeNull();
+    expect(resolveSession(previous.token)).toBeNull();
     const now = resolveSession(c.sessionToken!)!;
-    expect(now.actor.isGuest).toBe(false); expect(now.user.email).toBe(g.state.profile.email);
-    expect(now.linkedGuestUserId).toBe(guestId);
+    expect(now.user.email).toBe(g.state.profile.email);
     expect(c.jar.has("morphie_oauth")).toBe(false); // the state cookie is single use
-    expect((await c.json(sessionRoute.GET, "/api/auth/session")).data).toMatchObject({ authenticated: true, isGuest: false });
+    const who = (await c.json(sessionRoute.GET, "/api/auth/session")).data;
+    expect(who).toMatchObject({ authenticated: true, user: { email: g.state.profile.email } });
+    expect(who).not.toHaveProperty("isGuest");
+  });
+
+  it("signs a visitor with no session up and in (the same flow does both)", async () => {
+    const g = fakeProvider("google"); setProviderOverrides({ google: g.p });
+    const users = n("SELECT COUNT(*) AS n FROM users");
+    const c = new Client();
+    const s = stateOf(await start(c, "google"));
+    expect(c.sessionToken).toBeUndefined(); // starting a login gives nobody a session
+    expect((await callback(c, "google", `code=abc&state=${s}`)).headers.get("location")).toBe("/");
+    expect(resolveSession(c.sessionToken!)!.user.email).toBe(g.state.profile.email);
+    expect(n("SELECT COUNT(*) AS n FROM users")).toBe(users + 1);
   });
 
   it("rejects a state mismatch, a missing cookie (another browser), a replay, and the wrong provider", async () => {
     const g = fakeProvider("google"), h = fakeProvider("github"); setProviderOverrides({ google: g.p, github: h.p });
-    const users = n("SELECT COUNT(*) AS n FROM users WHERE is_guest = 0");
+    const users = n("SELECT COUNT(*) AS n FROM users");
     // attacker lures the victim into finishing the attacker's login: state belongs to another browser
     const attacker = new Client(); const s = stateOf(await start(attacker, "google"));
     const victim = new Client();
@@ -307,7 +395,7 @@ describe("OAuth: state, PKCE, redirect URI", () => {
     expect((await callback(f, "github", `code=abc&state=${s3}`)).headers.get("location")).toBe("/?auth_error=state_mismatch");
     expect(h.calls).toHaveLength(0);
     expect(g.calls).toHaveLength(1);                       // only the one legitimate completion ever reached the provider
-    expect(n("SELECT COUNT(*) AS n FROM users WHERE is_guest = 0")).toBe(users + 1);
+    expect(n("SELECT COUNT(*) AS n FROM users")).toBe(users + 1);
   });
 
   it("blocks login CSRF: a victim who has their OWN pending login can't be steered into the attacker's", async () => {
@@ -481,13 +569,13 @@ describe("account linking: one account per verified email", () => {
   });
 });
 
-describe("login does not disturb other sessions or leak guest data", () => {
-  it("the guest's conversations stay with the guest id until they are claimed (never exposed to the account by login alone)", async () => {
-    const tab = new Client(); await tab.call(bootstrap.GET, "/api/bootstrap");
-    const guestId = resolveSession(tab.sessionToken!)!.actor.userId;
-    createConversation(testActor(guestId), "chat", "Guest chat");
-    const addr = email(); await ask(tab, addr); await verify(tab, addr, lastCode(addr));
-    expect((await tab.json(conversations.GET, "/api/conversations")).data.conversations).toEqual([]); // the account starts empty; claim is a separate step
-    expect(n("SELECT COUNT(*) AS n FROM conversations WHERE user_id = ?", guestId)).toBe(1);
+describe("login does not disturb other sessions or leak other people's data", () => {
+  it("a new account starts empty; other accounts keep their sessions and their data", async () => {
+    const other = makeUser(); const otherBrowser = new Client(); signIn(otherBrowser, other.userId);
+    createConversation(testActor(other.userId), "chat", "Someone else's chat");
+    const tab = new Client(); const addr = email(); await ask(tab, addr); await verify(tab, addr, lastCode(addr));
+    expect((await tab.json(conversations.GET, "/api/conversations")).data.conversations).toEqual([]);
+    expect(resolveSession(otherBrowser.sessionToken!)).not.toBeNull();
+    expect((await otherBrowser.json(conversations.GET, "/api/conversations")).data.conversations.map((c: any) => c.title)).toEqual(["Someone else's chat"]);
   });
 });

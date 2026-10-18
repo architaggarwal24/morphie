@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { normalizeEmail } from "@/server/auth/accounts";
 import { isPlausibleEmail, requestCode, CODE_TTL_MS, RESEND_COOLDOWN_MS } from "@/server/auth/otp";
-import { emailLoginEnabled } from "@/server/email";
+import { deliveryStatus, emailLoginEnabled } from "@/server/email";
 import { ApiError, route } from "@/server/http";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,5 +16,8 @@ export const POST = route({ auth: "public", rate: { bucket: "auth-email-request"
   const e = normalizeEmail(email);
   if (!isPlausibleEmail(e)) throw new ApiError(400, "Enter a valid email address.", "invalid_email");
   requestCode(e, c.ip);
-  return { ok: true, expiresInMinutes: CODE_TTL_MS / 60_000, resendAfterSeconds: RESEND_COOLDOWN_MS / 1000 };
+  // `delivery` says something about the server, never about the address: "console" (development: nothing is emailed, the code
+  // is printed in the server's terminal) or "failing" (the last send failed). Omitted when everything is fine.
+  const delivery = deliveryStatus();
+  return { ok: true, expiresInMinutes: CODE_TTL_MS / 60_000, resendAfterSeconds: RESEND_COOLDOWN_MS / 1000, ...(delivery ? { delivery } : {}) };
 });

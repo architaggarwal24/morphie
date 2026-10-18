@@ -20,8 +20,10 @@ import * as providerModels from "@/app/api/providers/models/route";
 import * as providerTest from "@/app/api/providers/test/route";
 import * as settings from "@/app/api/settings/route";
 import * as workspaceFile from "@/app/api/workspace/file/route";
+import { startSession } from "@/server/auth/session";
 import { _resetRateLimits } from "@/server/security";
 import { Mock, startMock } from "./helpers/mock";
+import { makeUser } from "./helpers/users";
 
 const ORIGIN = "http://localhost:3000";
 let mock: Mock;
@@ -51,8 +53,12 @@ beforeAll(async () => {
 });
 afterAll(async () => { await mock.close(); });
 
+/** A browser. By default it is signed in as a brand-new account (there is no other kind of caller); `new Session(false)` is a visitor. */
 class Session {
   cookie = "";
+  constructor(signedIn = true) {
+    if (signedIn) this.cookie = `morphie_session=${startSession(makeUser().userId, { ip: "test" }).token}`;
+  }
   async call(handler: Function, p: string, init: { method?: string; body?: unknown; origin?: string | null; params?: Record<string, string>; form?: FormData } = {}) {
     const method = init.method ?? "GET";
     const headers: Record<string, string> = { host: "localhost:3000" };
@@ -98,26 +104,27 @@ const customProvider = (over: object = {}) => ({
 });
 
 describe("session, CSRF and bootstrap", () => {
-  it("issues a signed httpOnly cookie, rejects cross-site writes, and serves the catalog", async () => {
+  it("serves the catalog to a signed-in user, rejects cross-site writes, and ignores forged cookies", async () => {
     const s = new Session();
     const res = await s.call(bootstrap.GET, "/api/bootstrap");
-    const cookie = res.headers.get("set-cookie")!;
-    // an opaque random token (32 bytes, base64url), HttpOnly, SameSite=Lax, and no Max-Age: a guest's cookie ends with the browser session
-    expect(cookie).toMatch(/^morphie_session=[A-Za-z0-9_-]{43};.*HttpOnly.*SameSite=Lax/);
-    expect(cookie).not.toMatch(/Max-Age|Expires/i);
+    expect(res.headers.get("set-cookie")).toBeNull(); // bootstrap never issues a session; only a login does
     const data: any = await res.json();
     expect(data.catalog.map((c: any) => c.kind)).toEqual(expect.arrayContaining(["openai", "anthropic", "gemini", "openrouter", "groq", "ollama", "custom"]));
     expect(data.customPresets.some((p: any) => p.id === "codecraft" && p.baseUrl === "https://codecraftapi.com/v1")).toBe(true);
     expect(data.profiles).toEqual([]);
+    expect(data.session).not.toBeNull();
 
     expect((await s.json(settings.PUT, "/api/settings", { method: "PUT", body: { approval: "always" }, origin: "https://evil.example" })).status).toBe(403);
     expect((await s.json(settings.PUT, "/api/settings", { method: "PUT", body: { approval: "always" }, origin: null })).status).toBe(200);
-    // a forged cookie is ignored (new identity), not trusted
-    const forged = new Session(); forged.cookie = "morphie_uid=AAAAAAAAAAAAAAAAAAAAAAAA.forgedsignaturevalue00000000";
-    const r = await forged.call(bootstrap.GET, "/api/bootstrap");
-    expect(r.headers.get("set-cookie")).toBeTruthy();
-    const forgedSession = new Session(); forgedSession.cookie = "morphie_session=" + "A".repeat(43);
-    expect((await forgedSession.call(bootstrap.GET, "/api/bootstrap")).headers.get("set-cookie")).toMatch(/^morphie_session=[A-Za-z0-9_-]{43};/);
+
+    // forged cookies are ignored: the visitor stays a visitor, gets the minimal payload, and nothing is issued
+    for (const forgedCookie of ["morphie_uid=AAAAAAAAAAAAAAAAAAAAAAAA.forgedsignaturevalue00000000", "morphie_session=" + "A".repeat(43)]) {
+      const forged = new Session(false); forged.cookie = forgedCookie;
+      const r = await forged.call(bootstrap.GET, "/api/bootstrap");
+      expect(r.headers.get("set-cookie")).toBeNull();
+      expect((await r.json()).session).toBeNull();
+      expect((await forged.json(settings.GET, "/api/settings")).status).toBe(401);
+    }
   });
 });
 
@@ -211,8 +218,7 @@ describe("custom OpenAI-compatible provider, configured entirely from the UI", (
       () => ({ tool_calls: [tc("workspace_write", { path: "notes/hello.md", content: "# Hi" })] }),
       () => ({ content: "Saved notes/hello.md." }),
     ];
-    const intruder = new Session();
-    await intruder.call(bootstrap.GET, "/api/bootstrap");
+    const intruder = new Session(); // another signed-in account
     let intruderBlocked = false;
     const events = await s.stream<AgentEvent>(chat.POST, "/api/chat", { message: "write me a note", mode: "agent" }, async (e) => {
       if (e.type === "approval") {

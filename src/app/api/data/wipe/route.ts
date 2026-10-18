@@ -5,8 +5,8 @@ import { clearWorkspace } from "@/server/workspace";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** Delete everything stored for this browser: keys, chats, documents, memories, designs, files. */
-export const POST = route({ auth: "guest" }, async (c) => {
+/** Delete everything this account has stored: keys, chats, documents, memories, designs, files. The account itself stays. */
+export const POST = route({ auth: "user" }, async (c) => {
   await c.body(z.object({ confirm: z.literal(true) }));
   wipeContent(c.actor);
   clearWorkspace(c.actor);

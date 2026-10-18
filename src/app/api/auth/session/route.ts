@@ -1,19 +1,18 @@
 import { loginMethods } from "@/server/auth/methods";
+import { deliveryStatus } from "@/server/email";
 import { route } from "@/server/http";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** Who am I? Never creates an identity: a visitor with no session simply gets authenticated:false. */
+/** Who am I? Never creates anything: a visitor with no session simply gets authenticated:false. */
 export const GET = route({ auth: "public" }, async (c) => {
   const s = c.session;
   const methods = loginMethods();
-  if (!s) return { authenticated: false, isGuest: null, user: null, methods };
-  const isGuest = s.actor.isGuest;
+  // Lets the login popup notice, a few seconds after asking for a code, that the mail server rejected it.
+  if (!s) return { authenticated: false, user: null, methods, ...(deliveryStatus() === "failing" ? { emailDelivery: "failing" as const } : {}) };
   return {
     authenticated: true,
-    isGuest,
-    user: isGuest ? null : { email: s.user.email, displayName: s.user.displayName },
-    // Guest work is temporary: tell the UI when this browser session ends so it can warn.
+    user: { email: s.user.email, displayName: s.user.displayName },
     expiresAt: s.absoluteExpiresAt,
     idleExpiresAt: s.idleExpiresAt,
     methods,

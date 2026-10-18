@@ -3,17 +3,15 @@ import { OAUTH_COOKIE, OAUTH_COOKIE_SECURE } from "./oauth";
 import { readCookie, rotateSession, sessionCookie, type ResolvedSession } from "./session";
 
 /**
- * Turn a proven identity into a session. The caller's current session (if any) is replaced by a brand-new token
- * (rotation: a pre-login token, including one an attacker might have planted, stops working). If the caller was a
- * guest, the guest's user id is remembered on the new session so the data can be claimed into the account.
- * The guest's data is NOT merged here and the guest session token dies with the rotation.
+ * Turn a proven identity into a session. This is the only place a session is created. The caller's current session
+ * (if any) is replaced by a brand-new token (rotation: a pre-login token, including one an attacker might have
+ * planted, stops working). A visitor with no session simply gets a new one.
  */
-export function finishLogin(req: Request, ip: string, current: ResolvedSession | null, userId: string): { cookie: string; guestLinked: boolean } {
-  const guest = current?.actor.isGuest && current.actor.userId !== userId ? current.actor.userId : undefined;
+export function finishLogin(req: Request, ip: string, current: ResolvedSession | null, userId: string): { cookie: string } {
   const started = rotateSession(current?.actor.sessionId ?? null, {
-    userId, isGuest: false, meta: { ip, userAgent: req.headers.get("user-agent") ?? undefined }, linkedGuestUserId: guest,
+    userId, meta: { ip, userAgent: req.headers.get("user-agent") ?? undefined },
   });
-  return { cookie: sessionCookie(started.token, started, req), guestLinked: !!guest };
+  return { cookie: sessionCookie(started.token, started, req) };
 }
 
 // The OAuth `state` lives in a short-lived cookie so only the browser that started the login can finish it.

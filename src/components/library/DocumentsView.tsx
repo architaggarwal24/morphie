@@ -81,7 +81,7 @@ export function DocumentsView() {
                 <li key={d.id} className="group flex items-center gap-3 px-4 py-3">
                   <span className="grid size-10 shrink-0 place-items-center rounded-xl border border-line bg-sunken text-muted"><Icon className="size-[18px]" aria-hidden /></span>
                   <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium">{d.name}</div><div className="mt-0.5 text-xs text-muted">{bytes(d.size)} · {d.chunkCount} section{d.chunkCount === 1 ? "" : "s"} · {timeAgo(d.createdAt)}</div></div>
-                  <Badge className="hidden sm:inline-flex">{d.kind}</Badge>
+                  <Badge className="max-sm:hidden">{d.kind}</Badge>
                   <IconButton label={`Delete ${d.name}`} className="hover:text-err" onClick={() => setDel(d)}><Trash2 className="size-4" /></IconButton>
                 </li>
               );

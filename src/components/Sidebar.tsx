@@ -13,7 +13,7 @@ function Shell({ title, action, children, label }: { title: string; action: Reac
   return (
     <>
       {open && <div className="fixed inset-0 z-30 bg-black/40 md:hidden" onClick={() => toggle(false)} aria-hidden />}
-      <aside aria-label={label} className={cn("z-40 flex-col border-r border-line bg-panel/80 backdrop-blur", open ? "fixed inset-y-0 left-0 flex w-[min(86vw,300px)] shadow-pop md:static md:shadow-none" : "hidden md:flex", "md:w-72 md:shrink-0")}>
+      <aside aria-label={label} className={cn("z-40 flex-col border-r border-line bg-panel/80 backdrop-blur-sm", open ? "fixed inset-y-0 left-0 flex w-[min(86vw,300px)] shadow-pop md:static md:shadow-none" : "hidden md:flex", "md:w-72 md:shrink-0")}>
         <div className="flex h-14 shrink-0 items-center justify-between px-4"><h2 className="font-display text-lg">{title}</h2><div className="flex items-center gap-1">{action}<IconButton label="Close" className="md:hidden" onClick={() => toggle(false)}><X className="size-4" /></IconButton></div></div>
         {children}
       </aside>
@@ -45,7 +45,7 @@ export function ConversationSidebar({ mode }: { mode: Mode }) {
       <div className="px-3 pb-2">
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-faint" aria-hidden />
-          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${noun}s`} aria-label={`Search ${noun}s`} className="h-9 pl-8 text-[13px]" />
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${noun}s`} aria-label={`Search ${noun}s`} className="h-9! pl-8" />
         </div>
       </div>
       <nav className="flex-1 overflow-y-auto px-2 pb-4" aria-label={`${noun} history`}>
@@ -61,7 +61,7 @@ export function ConversationSidebar({ mode }: { mode: Mode }) {
                   <li key={c.id} className="group relative">
                     {editing === c.id ? (
                       <form className="flex items-center gap-1 px-1 py-0.5" onSubmit={(e) => { e.preventDefault(); if (draft.trim()) void renameConversation(c.id, draft.trim()); setEditing(null); }}>
-                        <Input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setEditing(null)} className="h-8 text-[13px]" aria-label="Conversation title" maxLength={120} />
+                        <Input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setEditing(null)} className="h-8!" aria-label="Conversation title" maxLength={120} />
                         <IconButton label="Save title" type="submit"><Check className="size-4" /></IconButton>
                       </form>
                     ) : (

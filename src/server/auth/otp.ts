@@ -1,7 +1,7 @@
 import { randomInt } from "node:crypto";
 import { hmacHex, randomId, safeEqualHex } from "../crypto";
 import { db, now } from "../db";
-import { transport } from "../email";
+import { noteSend, sendFailureHint, transport } from "../email";
 import { findOrCreateAccount, normalizeEmail, type AccountUser } from "./accounts";
 
 /**
@@ -59,7 +59,14 @@ export function requestCode(rawEmail: string, ip: string, at = now()): void {
       .run(id, email, codeHash(email, id, code), at, at + CODE_TTL_MS, ip.slice(0, 64));
   })();
   // Fire and forget: awaiting the mail server would make "known"/"unknown" or "sent"/"skipped" measurable by timing.
-  void transport().send({ to: email, subject: "Your Morphie sign-in code", text: body(code) }).catch((e) => console.error("[auth] couldn't send sign-in email:", (e as Error).message));
+  const t = transport();
+  void t.send({ to: email, subject: "Your Morphie sign-in code", text: body(code) }).then(
+    () => noteSend(true),
+    (e) => {
+      noteSend(false);
+      console.error(`[auth] couldn't send the sign-in email (${t.name}): ${(e as Error).message}. ${sendFailureHint(t.name)}`.trim());
+    },
+  );
 }
 
 export type VerifyResult = { ok: true; user: AccountUser; created: boolean } | { ok: false };

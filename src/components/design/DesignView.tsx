@@ -134,7 +134,7 @@ export function DesignView() {
           <IconButton label="Open projects" className="md:hidden" onClick={() => toggleSidebar(true)}><Menu className="size-[18px]" /></IconButton>
           {editingName && state ? (
             <form className="flex flex-1 items-center gap-1" onSubmit={(e) => { e.preventDefault(); if (name.trim()) void rename(name.trim()); setEditingName(false); }}>
-              <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setEditingName(false)} maxLength={60} aria-label="Design name" className="h-8 text-sm" />
+              <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setEditingName(false)} maxLength={60} aria-label="Design name" className="h-8! text-sm" />
               <IconButton label="Save name" type="submit"><Check className="size-4" /></IconButton>
             </form>
           ) : (
@@ -180,7 +180,7 @@ export function DesignView() {
             {ideas.slice(0, state ? 6 : 4).map((s) => <button key={s} disabled={!!busy} onClick={() => submit(s)} className="shrink-0 rounded-full border border-line bg-panel px-3 py-1 text-xs text-muted transition hover:border-accent/50 hover:text-fg disabled:opacity-50">{s.length > 44 ? s.slice(0, 43) + "…" : s}</button>)}
           </div>
           <div className="flex items-end gap-2 rounded-2xl border border-line bg-panel p-2 transition focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/15">
-            <textarea ref={ta} value={text} rows={1} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); } }} placeholder={state ? "Describe a change…" : "Describe the site you want…"} aria-label="Design instruction" maxLength={4000} className="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed outline-none placeholder:text-faint" />
+            <textarea ref={ta} value={text} rows={1} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); } }} placeholder={state ? "Describe a change…" : "Describe the site you want…"} aria-label="Design instruction" maxLength={4000} className="max-h-40 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-relaxed outline-hidden placeholder:text-faint" />
             {busy ? <button onClick={stop} aria-label="Stop" className="grid size-9 shrink-0 place-items-center rounded-xl bg-fg text-bg"><Square className="size-3.5 fill-current" /></button>
               : <button onClick={() => submit()} disabled={!text.trim()} aria-label="Send" className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent text-accent-fg transition hover:brightness-110 disabled:opacity-30"><ArrowUp className="size-[18px]" /></button>}
           </div>
@@ -193,7 +193,7 @@ export function DesignView() {
         <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-3 md:px-4">
           <div className="inline-flex rounded-xl border border-line bg-sunken p-0.5" role="radiogroup" aria-label="Preview device">
             {DEVICES.map(({ d, icon: Icon, label }) => (
-              <button key={d} role="radio" aria-checked={device === d} aria-label={`${label} (${DEVICE_WIDTHS[d]}px)`} title={`${label} · ${DEVICE_WIDTHS[d]}px`} onClick={() => setDevice(d)} className={cn("grid size-8 place-items-center rounded-lg transition", device === d ? "bg-panel text-fg shadow-sm" : "text-muted hover:text-fg")}><Icon className="size-4" /></button>
+              <button key={d} role="radio" aria-checked={device === d} aria-label={`${label} (${DEVICE_WIDTHS[d]}px)`} title={`${label} · ${DEVICE_WIDTHS[d]}px`} onClick={() => setDevice(d)} className={cn("grid size-8 place-items-center rounded-lg transition", device === d ? "bg-panel text-fg shadow-xs" : "text-muted hover:text-fg")}><Icon className="size-4" /></button>
             ))}
           </div>
           <span className="hidden font-mono text-[11px] text-faint sm:block">{DEVICE_WIDTHS[device]}px</span>
@@ -203,7 +203,7 @@ export function DesignView() {
             {state && <VersionMenu state={state} />}
             {state && <ThemePicker state={state} />}
             {state && <Button size="sm" variant="primary" onClick={() => setExporting(true)}><Download className="size-4" aria-hidden /> <span className="hidden sm:inline">Export</span></Button>}
-            {state && <IconButton label={inspector ? "Hide details" : "Show details"} active={inspector} className="hidden xl:grid" onClick={() => setInspector((i) => !i)}><PanelRight className="size-4" /></IconButton>}
+            {state && <IconButton label={inspector ? "Hide details" : "Show details"} active={inspector} className="max-xl:hidden xl:grid" onClick={() => setInspector((i) => !i)}><PanelRight className="size-4" /></IconButton>}
           </div>
         </div>
         <div className="flex min-h-0 flex-1">

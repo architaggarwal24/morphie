@@ -9,12 +9,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-export const GET = route({ auth: "guest" }, async (c) => ({ designs: listDesigns(c.actor), ...catalog() }));
+export const GET = route({ auth: "user" }, async (c) => ({ designs: listDesigns(c.actor), ...catalog() }));
 
 const body = z.object({ designId: z.string().max(40).nullable().optional(), message: z.string().trim().min(1, "Describe what to design or change.").max(4000) });
 
 /** Streams DesignEvents: progress stages, then a result (or a clarification / error). */
-export const POST = route({ auth: "guest", rate: { bucket: "design", limit: 20, windowMs: 60_000 } }, async (c) => {
+export const POST = route({ auth: "user", rate: { bucket: "design", limit: 20, windowMs: 60_000 } }, async (c) => {
   const b = await c.body(body);
   if (b.designId) requireDesign(c.actor, b.designId); // someone else's design is a 404 before the stream starts
   const provider = await activeProvider(c.actor);

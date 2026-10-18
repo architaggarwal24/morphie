@@ -10,7 +10,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** A portable JSON copy of your data. API keys and header values are never included. */
-export const GET = route({ auth: "guest" }, async (c) => {
+export const GET = route({ auth: "user" }, async (c) => {
   const conversations = listConversations(c.actor).map((conv) => ({ ...getConversation(c.actor, conv.id), messages: getMessages(c.actor, conv.id) }));
   const data = {
     exportedAt: new Date().toISOString(),

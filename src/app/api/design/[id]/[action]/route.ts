@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 const format = (url: URL) => url.searchParams.get("format") ?? "html";
 
-export const GET = route({ auth: "guest" }, async (c) => {
+export const GET = route({ auth: "user" }, async (c) => {
   if (c.params.action === "export") return exportDesign(c.actor, c.params.id, format(c.url));
   if (c.params.action === "download") {
     const zip = exportZip(c.actor, c.params.id, format(c.url));
@@ -15,7 +15,7 @@ export const GET = route({ auth: "guest" }, async (c) => {
   throw new ApiError(404, "Not found.", "not_found");
 });
 
-export const POST = route({ auth: "guest" }, async (c) => {
+export const POST = route({ auth: "user" }, async (c) => {
   const { id, action } = c.params;
   switch (action) {
     case "undo": return { state: await undo(c.actor, id) };
